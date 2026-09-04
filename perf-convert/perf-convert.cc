@@ -23,6 +23,7 @@
 
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
+#include "absl/flags/usage.h"
 #include "absl/log/absl_check.h"
 #include "absl/log/globals.h"
 #include "absl/log/initialize.h"
@@ -320,6 +321,10 @@ int Run() {
 }  // namespace perf_convert
 
 int main(int argc, char** argv) {
+  absl::SetProgramUsageMessage(
+      "Rewrites a `perf record --call-graph dwarf` recording, replacing the raw\n"
+      "stack dumps with plain callchains.\n\n"
+      "Usage: perf-convert --input perf.data --output out.perf.data");
   absl::ParseCommandLine(argc, argv);
   absl::InitializeLog();
   absl::SetStderrThreshold(absl::LogSeverity::kWarning);
