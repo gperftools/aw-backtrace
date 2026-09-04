@@ -42,7 +42,7 @@ bazel test -c opt ...:all        # NDEBUG: drops assert(), keeps CHECK()
 ./test-all-cfg.rb                # gcc/clang x dbg/opt sweep, all four green
 ```
 
-Twelve tests: ten in the top package plus `//perf-convert`'s two. `:all` instead
+Eleven tests: nine in the top package plus `//perf-convert`'s two. `:all` instead
 of `...:all` skips perf-convert. `v/mini-x86-int` is in `.bazelignore`, so
 `@mini-x86-int//:sim_stepper_test` runs only by explicit label.
 
@@ -72,10 +72,11 @@ Traps worth knowing before you fight the build:
   author, no upstream. A fix belonging in the stepper goes in the stepper.
 * `:aw-backtrace` is the only public target and the only public header
   (`include/aw-backtrace/aw-backtrace.h`, via `strip_include_prefix`).
-* `:with-exit` compiles both `with-exit-amd64.S` and `with-exit-generic.cc`
-  everywhere, with a preprocessor guard inside the objects picking which defines
-  the symbols — that is what lets `:with-exit-forced-generic` exercise the
-  setjmp/longjmp fallback on x86-64. A wrong arch guard = duplicate symbols.
+* `:with-exit` is header-only (`with-exit.h`): `WithExit::Run`/`Exit` are a thin
+  `_setjmp`/`_longjmp` wrapper, both `NEVER_INLINE` so `Run`'s `_setjmp` frame is
+  never folded into a caller. There used to be a hand-written amd64 asm variant
+  (`aw_backtrace_run_raw`/`_exit_raw`); it was dropped — `_setjmp`/`_longjmp`
+  benchmarks the same on `recursion-test`'s slow-path microbench.
 
 ### genbuild.rb / ninja — the LD_PRELOAD comparer
 
@@ -121,7 +122,7 @@ Cache counters only exist when `AW_BUMP_STATS_IN_PRODUCTION` is defined —
 | `aw-arch.h`, `aw-arch-x86_64.h`, `aw-arch-aarch64.h` | per-arch `struct Arch` with a fixed static interface. Adding an arch means implementing exactly that set |
 | `unwind-info-cache.h` | `UnwindInfoCache`: lock-free, fixed-size, bucketed, second-chance eviction (§4.4) |
 | `aw-addrcheck.{h,c}` | async-signal-safe `/proc/self/maps` querying, `PROCMAP_QUERY` or snapshot+bsearch. Validates addresses before dereferencing |
-| `with-exit.{h,S,cc}` | `WithExit::Run`/`Exit` — non-local exit without setjmp's returns-twice. **Nothing runs on the way out**, no destructors |
+| `with-exit.h` | `WithExit::Run`/`Exit` — header-only `_setjmp`/`_longjmp` wrapper hiding the returns-twice. **Nothing runs on the way out**, no destructors |
 | `check.h` | `CHECK()`, unconditional (not `NDEBUG`-gated). For differential self-checks, never the capture path |
 | `dwarf-constants.h`, `utils.h`, `simple-counter.h`, `static_storage.h`, `function_ref.h` | constants and small utilities lifted from gperftools/tcmalloc |
 

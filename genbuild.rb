@@ -35,7 +35,7 @@ CXXFLAGS = [BASE_CFLAGS, BASE_CXXFLAGS, APPEND_CFLAGS].join(' ')
 # automagically flattened. So it could be singular thing or (nested)
 # array of things and it just works.
 def build! b
-  aw_backtrace = b.o(src: %w[aw-backtrace.cc backtrace-core.cc with-exit-amd64.S with-exit-generic.cc])
+  aw_backtrace = b.o(src: %w[aw-backtrace.cc backtrace-core.cc])
   aw_addrcheck = b.o(src: "aw-addrcheck.c")
 
   comparer = b.o(src: "backtrace-comparer.cc", cflags: %w[-DBUILD_SO -DAW_BUMP_STATS_IN_PRODUCTION])

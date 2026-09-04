@@ -384,9 +384,10 @@ struct NoDiag {
 
   // The production path always takes the fast decoder and always
   // caches; both fold to compile-time constants here so the generated
-  // code is exactly what it was.
+  // code is exactly what it was. TESTING_NO_FASTPATH / TESTING_NO_CACHE
+  // force the slow / uncached path for benchmarking (see recursion-test).
   bool use_fastpath() const {
-#if __x86_64__
+#if __x86_64__ && !defined(TESTING_NO_FASTPATH)
     return true;
 #else
     return false;

@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: 0BSD
 #ifndef WITH_EXIT_H_
 #define WITH_EXIT_H_
+#include <setjmp.h>
 #include <stdint.h>
-
-#include <type_traits>
 
 #include "function_ref.h"
 
@@ -20,6 +19,8 @@
 // Nothing runs on the way out. Every frame between Exit and Run is
 // discarded without executing destructors, so no code inside body may
 // rely on RAII for anything that matters.
+//
+// The implementation is a thin wrapper over _setjmp/_longjmp.
 namespace aw_backtrace_internal {
 
 struct ExitCookie {
@@ -30,29 +31,29 @@ struct ExitCookie {
 
 inline constexpr ExitCookie kInvalidExit = ExitCookie{};
 
-// The machine-specific pair the C++ API above is built from. See
-// with-exit-amd64.S or with-exit-generic.cc
-extern "C" {
-
-// Calls fn(cookie, data). Returns false if fn returned normally, true
-// if fn (or anything below it) passed cookie to aw_backtrace_exit_raw.
-bool aw_backtrace_run_raw(void (*fn)(ExitCookie, void*), void* data);
-
-// Discards every frame down to the aw_backtrace_run_raw call that
-// produced cookie, making it return true.
-[[noreturn]] void aw_backtrace_exit_raw(ExitCookie cookie);
-
-}  // extern "C"
-
 struct WithExit {
   // Returns false if body returned normally, true if it exited via Exit.
-  static bool Run(FunctionRef<void(ExitCookie)> body) {
-    return aw_backtrace_run_raw(body.fn, body.data);
+  __attribute__((noinline)) static bool Run(FunctionRef<void(ExitCookie)> body) {
+    RunFrame frame;
+    if (_setjmp(frame.buf) != 0) {
+      return true;
+    }
+    body(ExitCookie{reinterpret_cast<uintptr_t>(&frame)});
+    return false;
   }
 
+  // Discards every frame down to the Run call that produced cookie,
+  // making it return true.
   [[noreturn]] static void Exit(ExitCookie cookie) {
-    aw_backtrace_exit_raw(cookie);
+    _longjmp(reinterpret_cast<RunFrame*>(cookie.data)->buf, 1);
   }
+
+ private:
+  // jmp_buf is a little odd (array type), so wrap it in a struct to keep
+  // the cookie round-trip sane.
+  struct RunFrame {
+    jmp_buf buf;
+  };
 };
 
 }  // namespace aw_backtrace_internal

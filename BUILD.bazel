@@ -89,27 +89,10 @@ cc_library(
     hdrs = ["static_storage.h"],
 )
 
+# Header-only: a thin wrapper over _setjmp/_longjmp (see with-exit.h).
 cc_library(
     name = "with-exit",
-    srcs = [
-        "with-exit-amd64.S",
-        "with-exit-generic.cc",
-    ],
     hdrs = ["with-exit.h"],
-    cxxopts = CXXOPTS,
-    deps = [":function_ref"],
-)
-
-# Same sources, but forced onto the setjmp/longjmp fallback, so the
-# portable path stays exercised on machines that have real asm for it.
-cc_library(
-    name = "with-exit-forced-generic",
-    srcs = [
-        "with-exit-generic.cc",
-    ],
-    hdrs = ["with-exit.h"],
-    cxxopts = CXXOPTS,
-    defines = ["FORCED_WITH_EXIT_GENERIC"],
     deps = [":function_ref"],
 )
 
@@ -120,16 +103,6 @@ cc_test(
     deps = [
         ":check",
         ":with-exit",
-    ],
-)
-
-cc_test(
-    name = "with-exit-generic-test",
-    srcs = ["with-exit-test.cc"],
-    cxxopts = CXXOPTS,
-    deps = [
-        ":check",
-        ":with-exit-forced-generic",
     ],
 )
 

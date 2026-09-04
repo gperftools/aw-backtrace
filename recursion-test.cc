@@ -25,8 +25,9 @@
 // is only exercised when building with -fomit-frame-pointer. Bazel's
 // default as at the time of writing is the opposite. I.e. manually
 // pass -fno-omit-frame-pointer to exercise that aspect. You may also
-// want to build with --copt=-DTESTING_NO_CACHE to benchmark without
-// caches if that is what you want to see.
+// want to build with --copt=-DTESTING_NO_CACHE (skip the cache) and/or
+// --copt=-DTESTING_NO_FASTPATH (force the full CFI decoder) to benchmark
+// the slow path if that is what you want to see.
 
 typedef enum {
   OP_CONST,

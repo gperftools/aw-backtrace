@@ -340,8 +340,8 @@ async-signal-safe context are:
   knows how to recognize FrameInfo for x86 DRAP functions. See
   `doc/amd64-drap-problem.adoc`. Chances are, you've never heard of
   DRAP. In that case, I suggest you ignore this part.
-* `with-exit.h`, `with-exit-amd64.S` and `with-exit-generic.cc` --
-  Non-local exits, à la setjmp/longjmp. NIH? Perhaps.
+* `with-exit.h` -- header-only non-local exits: a thin `_setjmp`/`_longjmp`
+  wrapper (`WithExit::Run`/`Exit`) that hides the returns-twice from callers.
 
 As you can see, the code is reasonably well split up and should be
 possible to follow/inspect.
