@@ -1,8 +1,11 @@
 /* -*- Mode: C; c-basic-offset: 8; indent-tabs-mode: t -*- */
 // SPDX-License-Identifier: 0BSD
 #define _GNU_SOURCE
-
+//
+#include "renamings.h"
+//
 #include "aw-addrcheck.h"
+//
 
 #include <assert.h>
 #include <errno.h>

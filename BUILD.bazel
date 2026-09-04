@@ -1,4 +1,5 @@
 # -*- Mode: python; -*-
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:private"])
@@ -21,6 +22,7 @@ cc_library(
     name = "aw-addrcheck",
     srcs = ["aw-addrcheck.c"],
     hdrs = ["aw-addrcheck.h"],
+    deps = [":headers"],
 )
 
 # Every internal header, in one target. Anything that compiles C++ here just
@@ -265,4 +267,52 @@ cc_binary(
     cxxopts = CXXOPTS,
     defines = ["USE_FP_BACKTRACE"],
     deps = [":simple-fp-backtrace"],
+)
+
+# Internal-only builds of :aw-addrcheck and :aw-backtrace with every symbol
+# prefixed, exactly as an embedder (e.g. gperftools) would build them. These
+# exist solely so aw-backtrace-prefixed-symbols-test below can catch
+# renamings.h falling out of sync with the library's real external-linkage
+# surface -- nothing should depend on them for any other reason.
+cc_library(
+    name = "aw-addrcheck-prefixed",
+    testonly = True,
+    srcs = ["aw-addrcheck.c"],
+    hdrs = ["aw-addrcheck.h"],
+    local_defines = ["AW_RENAME_PREFIX=tcmalloc_"],
+    deps = [":headers"],
+)
+
+cc_library(
+    name = "aw-backtrace-prefixed",
+    testonly = True,
+    srcs = [
+        "aw-backtrace.cc",
+        "backtrace-core.cc",
+    ],
+    hdrs = ["include/aw-backtrace/aw-backtrace.h"],
+    cxxopts = CXXOPTS,
+    local_defines = ["AW_RENAME_PREFIX=tcmalloc_"],
+    strip_include_prefix = "include",
+    deps = [
+        ":aw-addrcheck-prefixed",
+        ":headers",
+    ],
+)
+
+genrule(
+    name = "aw-backtrace-prefixed-symbols-check",
+    testonly = True,
+    srcs = [
+        ":aw-addrcheck-prefixed",
+        ":aw-backtrace-prefixed",
+    ],
+    outs = ["aw-backtrace-prefixed-symbols-check.ok"],
+    cmd = "sh $(location :check-prefixed-symbols.sh) tcmalloc_ $(SRCS) > $@",
+    tools = [":check-prefixed-symbols.sh"],
+)
+
+build_test(
+    name = "aw-backtrace-prefixed-symbols-test",
+    targets = [":aw-backtrace-prefixed-symbols-check"],
 )
