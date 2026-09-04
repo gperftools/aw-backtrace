@@ -13,7 +13,6 @@
 #include <span>
 #include <utility>
 
-#include "aw-addrcheck.h"
 #include "aw-structs.h"
 #include "dwarf-constants.h"
 
@@ -225,7 +224,9 @@ struct Arch {
  private:
   template <typename AddrChecker>
   static bool CheckPossiblePC(AddrChecker* checker, uintptr_t maybe_pc) {
-    std::optional<aw_addrcheck_entry> pc_vma = checker->Lookup(maybe_pc);
+    // pc_vma is really std::optional<aw_addrcheck_entry>, but we
+    // avoid include here. Real AddrChecker wrapper is in .cc anyways.
+    auto pc_vma = checker->Lookup(maybe_pc);
     return (pc_vma && pc_vma->perm_exec);
   }
 

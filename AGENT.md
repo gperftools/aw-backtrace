@@ -54,6 +54,15 @@ Traps worth knowing before you fight the build:
   rather than `copts` so it stays off the C compiles (`aw-addrcheck.c`). The
   public header is deliberately standard-agnostic — it compiles as C99 and as
   C++11 and up — so a consumer on an older standard can still include it.
+* **All internal headers are one target, `:internal`** (a `glob(["*.h"])`).
+  Every target that compiles C++ deps `:internal` and `#include`s whatever it
+  needs — there are no per-header libraries and no dependency-layering to keep
+  in sync. `:internal` carries no compile options (headers only), so it leaks
+  nothing into a consumer; the `.cc` implementations still have their own
+  targets. Two things stay out of the glob: `aw-addrcheck.h` (its own `:aw-
+  addrcheck` C target, `exclude`d) and the public header (`:aw-backtrace-hdr`,
+  shipped under `aw-backtrace/` via `strip_include_prefix`). `:internal` also
+  carries `linkopts = ["-latomic"]`, so every C++ target gets it.
 * **`.bazelrc` is for *this* workspace only.** It forces `-std=c++20` across the
   whole graph so abseil matches what `//perf-convert` compiles against. It does
   nothing for anyone depending on us.
@@ -72,11 +81,8 @@ Traps worth knowing before you fight the build:
   author, no upstream. A fix belonging in the stepper goes in the stepper.
 * `:aw-backtrace` is the only public target and the only public header
   (`include/aw-backtrace/aw-backtrace.h`, via `strip_include_prefix`).
-* `:with-exit` is header-only (`with-exit.h`): `WithExit::Run`/`Exit` are a thin
-  `_setjmp`/`_longjmp` wrapper, both `NEVER_INLINE` so `Run`'s `_setjmp` frame is
-  never folded into a caller. There used to be a hand-written amd64 asm variant
-  (`aw_backtrace_run_raw`/`_exit_raw`); it was dropped — `_setjmp`/`_longjmp`
-  benchmarks the same on `recursion-test`'s slow-path microbench.
+* `with-exit.h` is header-only: `WithExit::Run`/`Exit` are a thin
+  `_setjmp`/`_longjmp` wrapper.
 
 ### genbuild.rb / ninja — the LD_PRELOAD comparer
 
@@ -576,7 +582,7 @@ True of the tree but not in `TODO`:
   ioctl-disable setter, but that header is internal (only
   `include/aw-backtrace/aw-backtrace.h` is exported), so it is not a public API
   wart.
-* **`linkopts = ["-latomic"]` on `:aw-base` propagates to every consumer.** Fine
+* **`linkopts = ["-latomic"]` on `:internal` propagates to every consumer.** Fine
   for a normal Bazel build, an integration wart for static links and non-glibc.
 * Naming mixes dashes and underscores (`function_ref.h`, `static_storage.h`,
   target `sym_helper_obj`…); new files go the dashed way.

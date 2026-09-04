@@ -5,7 +5,6 @@
 
 #include <stdint.h>
 
-#include "aw-backtrace/aw-backtrace.h"
 #include "aw-structs.h"
 #include "eh-frame-reader.h"
 
