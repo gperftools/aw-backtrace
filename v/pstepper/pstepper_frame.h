@@ -14,23 +14,29 @@
 #ifndef PSTEPPER_FRAME_H_
 #define PSTEPPER_FRAME_H_
 
-#define PSTEPPER_OFF_RAX     0
-#define PSTEPPER_OFF_RBX     8
-#define PSTEPPER_OFF_RCX     16
-#define PSTEPPER_OFF_RDX     24
-#define PSTEPPER_OFF_RSI     32
-#define PSTEPPER_OFF_RDI     40
-#define PSTEPPER_OFF_RBP     48
-#define PSTEPPER_OFF_R8      56
-#define PSTEPPER_OFF_R9      64
-#define PSTEPPER_OFF_R10     72
-#define PSTEPPER_OFF_R11     80
-#define PSTEPPER_OFF_R12     88
-#define PSTEPPER_OFF_R13     96
-#define PSTEPPER_OFF_R14     104
-#define PSTEPPER_OFF_R15     112
-#define PSTEPPER_OFF_RIP     120
-#define PSTEPPER_OFF_RSP     128
+/*
+ * Field order mirrors x86-64 glibc's gregset_t -- the REG_* indices in
+ * <sys/ucontext.h> -- so a "fake"-ish ucontext_t built from this frame is a
+ * straight index mapping. Keep pstepper_gpregs_t in pstepper.h in lockstep;
+ * the _Static_assert block below is the enforcement.
+ */
+#define PSTEPPER_OFF_R8      0
+#define PSTEPPER_OFF_R9      8
+#define PSTEPPER_OFF_R10     16
+#define PSTEPPER_OFF_R11     24
+#define PSTEPPER_OFF_R12     32
+#define PSTEPPER_OFF_R13     40
+#define PSTEPPER_OFF_R14     48
+#define PSTEPPER_OFF_R15     56
+#define PSTEPPER_OFF_RDI     64
+#define PSTEPPER_OFF_RSI     72
+#define PSTEPPER_OFF_RBP     80
+#define PSTEPPER_OFF_RBX     88
+#define PSTEPPER_OFF_RDX     96
+#define PSTEPPER_OFF_RAX     104
+#define PSTEPPER_OFF_RCX     112
+#define PSTEPPER_OFF_RSP     120
+#define PSTEPPER_OFF_RIP     128
 
 /*
  * The XSAVE save area. Must be 64-byte aligned both within the frame and at
@@ -89,13 +95,6 @@ typedef struct pstepper_frame {
     unsigned char xsave_area[PSTEPPER_XSAVE_AREA_SIZE] __attribute__((aligned(64)));
 } pstepper_frame_t;
 
-_Static_assert(offsetof(pstepper_frame_t, gpr.rax) == PSTEPPER_OFF_RAX, "offset drift: rax");
-_Static_assert(offsetof(pstepper_frame_t, gpr.rbx) == PSTEPPER_OFF_RBX, "offset drift: rbx");
-_Static_assert(offsetof(pstepper_frame_t, gpr.rcx) == PSTEPPER_OFF_RCX, "offset drift: rcx");
-_Static_assert(offsetof(pstepper_frame_t, gpr.rdx) == PSTEPPER_OFF_RDX, "offset drift: rdx");
-_Static_assert(offsetof(pstepper_frame_t, gpr.rsi) == PSTEPPER_OFF_RSI, "offset drift: rsi");
-_Static_assert(offsetof(pstepper_frame_t, gpr.rdi) == PSTEPPER_OFF_RDI, "offset drift: rdi");
-_Static_assert(offsetof(pstepper_frame_t, gpr.rbp) == PSTEPPER_OFF_RBP, "offset drift: rbp");
 _Static_assert(offsetof(pstepper_frame_t, gpr.r8)  == PSTEPPER_OFF_R8,  "offset drift: r8");
 _Static_assert(offsetof(pstepper_frame_t, gpr.r9)  == PSTEPPER_OFF_R9,  "offset drift: r9");
 _Static_assert(offsetof(pstepper_frame_t, gpr.r10) == PSTEPPER_OFF_R10, "offset drift: r10");
@@ -104,8 +103,15 @@ _Static_assert(offsetof(pstepper_frame_t, gpr.r12) == PSTEPPER_OFF_R12, "offset 
 _Static_assert(offsetof(pstepper_frame_t, gpr.r13) == PSTEPPER_OFF_R13, "offset drift: r13");
 _Static_assert(offsetof(pstepper_frame_t, gpr.r14) == PSTEPPER_OFF_R14, "offset drift: r14");
 _Static_assert(offsetof(pstepper_frame_t, gpr.r15) == PSTEPPER_OFF_R15, "offset drift: r15");
-_Static_assert(offsetof(pstepper_frame_t, gpr.rip) == PSTEPPER_OFF_RIP, "offset drift: rip");
+_Static_assert(offsetof(pstepper_frame_t, gpr.rdi) == PSTEPPER_OFF_RDI, "offset drift: rdi");
+_Static_assert(offsetof(pstepper_frame_t, gpr.rsi) == PSTEPPER_OFF_RSI, "offset drift: rsi");
+_Static_assert(offsetof(pstepper_frame_t, gpr.rbp) == PSTEPPER_OFF_RBP, "offset drift: rbp");
+_Static_assert(offsetof(pstepper_frame_t, gpr.rbx) == PSTEPPER_OFF_RBX, "offset drift: rbx");
+_Static_assert(offsetof(pstepper_frame_t, gpr.rdx) == PSTEPPER_OFF_RDX, "offset drift: rdx");
+_Static_assert(offsetof(pstepper_frame_t, gpr.rax) == PSTEPPER_OFF_RAX, "offset drift: rax");
+_Static_assert(offsetof(pstepper_frame_t, gpr.rcx) == PSTEPPER_OFF_RCX, "offset drift: rcx");
 _Static_assert(offsetof(pstepper_frame_t, gpr.rsp) == PSTEPPER_OFF_RSP, "offset drift: rsp");
+_Static_assert(offsetof(pstepper_frame_t, gpr.rip) == PSTEPPER_OFF_RIP, "offset drift: rip");
 _Static_assert(offsetof(pstepper_frame_t, xsave_area) == PSTEPPER_OFF_XSAVE,
                "offset drift: xsave_area");
 _Static_assert(PSTEPPER_OFF_XSAVE % 64 == 0,

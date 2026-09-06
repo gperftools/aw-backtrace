@@ -34,10 +34,15 @@ CC = ENV['CC'] || 'cc'
 # Override with QEMU_X86_64=... -- it's a PRECIOUS_ENV, the script re-execs.
 QEMU = ENV['QEMU_X86_64'] || '../qemu/build/qemu-x86_64'
 
-PLUGIN_CFLAGS = ["-Ithird_party/",
+# -D_GNU_SOURCE: pstepper.h includes <sys/ucontext.h> and _Static_asserts its
+# pstepper_gpregs_t field order against gregset_t's REG_* indices, which glibc
+# only exposes under __USE_GNU. Both the guest plumbing and the plugin include
+# pstepper.h, so both need it.
+PLUGIN_CFLAGS = ["-D_GNU_SOURCE",
+                 "-Ithird_party/",
                  `pkg-config --cflags glib-2.0`.chomp].join(' ')
 
-GUEST_CFLAGS = []
+GUEST_CFLAGS = ["-D_GNU_SOURCE"]
 GUEST_LDLIBS = []
 
 # A simple "executable model" of what gets built -- see the long comment on
