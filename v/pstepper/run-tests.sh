@@ -1,8 +1,12 @@
 #!/bin/sh
 #
-# Trivial pstepper test runner. Builds (./genbuild.rb ninja), then runs each
-# guest test program under qemu-x86_64 with the plugin. Each program
-# self-checks and exits nonzero on failure, so `set -e` is the whole harness.
+# Ad-hoc / stress pstepper test runner. For the normal build+test cycle use
+# `ninja check` instead -- see testrunner.rb. This script stays for running
+# one test (or a tight -n loop of one) without going through ninja.
+#
+# Builds (./genbuild.rb ninja), then runs each guest test program under
+# qemu-x86_64 with the plugin. Each program self-checks and exits nonzero on
+# failure, so `set -e` is the whole harness.
 #
 #   ./run-tests.sh                              build + run each once
 #   ./run-tests.sh pstepper_thread_test         just one

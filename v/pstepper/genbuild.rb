@@ -7,10 +7,17 @@
 #
 #   ./genbuild.rb              (re)generate build.ninja
 #   ./genbuild.rb ninja        regenerate, then run `ninja -v`
-#   ./genbuild.rb CC=clang ninja      one-off env overrides (script re-execs)
+#   ./genbuild.rb ninja CC=clang  one-off env overrides (script re-execs)
+#   ./genbuild.rb check        regenerate, then run `ninja -v check`
+#
+# Then, to build + run the guest tests:
+#   ninja            build the plugin + all test binaries (the default)
+#   ninja check      build, then run every test under qemu (always -- no
+#                    result caching), print a summary
+# See testrunner.rb for the check machinery.
 #
 # Overridable via the environment (see PRECIOUS_ENVS): CC, CFLAGS, LDFLAGS,
-# LIBS.
+# LIBS, QEMU_X86_64 (the qemu-x86_64 `ninja check` runs tests under).
 
 require 'digest/md5'
 require 'shellwords'
@@ -22,12 +29,14 @@ LDFLAGS = ENV['LDFLAGS'] || ''
 LIBS = ENV['LIBS'] || ''
 CC = ENV['CC'] || 'cc'
 
+# qemu-x86_64 the tests run under (`ninja check`). Baked into build.ninja via
+# the RUN_TEST rule, so pointing at a different binary re-runs every test.
+# Override with QEMU_X86_64=... -- it's a PRECIOUS_ENV, the script re-execs.
+QEMU = ENV['QEMU_X86_64'] || '../qemu/build/qemu-x86_64'
+
 PLUGIN_CFLAGS = ["-Ithird_party/",
                  `pkg-config --cflags glib-2.0`.chomp].join(' ')
 
-# The trampoline asm and the plugin's fixed-address resume marker both
-# assume the guest binary is not relocated: -fno-pie to compile, -no-pie
-# to link. (Cheap to revisit -- the .S is actually PC-relative-clean.)
 GUEST_CFLAGS = []
 GUEST_LDLIBS = []
 
@@ -44,12 +53,17 @@ def build!(b)
                     inputs: b.o(src: "pstepper_plugin.c", cflags: PLUGIN_CFLAGS))
 
   # Self-checking guest programs (each computes a native reference in-process
-  # and compares; run them under qemu with the plugin -- see run-tests.sh).
+  # and compares). `b.test` wraps the program in a Test artifact -- returned
+  # like any other, the builder pulls the Test-s out and emits their
+  # `.tests/<name>.trs` run edges + the `check` target (see emit_tests! /
+  # testrunner.rb). The plugin .so is listed as a dep for ordering (build it
+  # before running), though `ninja check` re-runs every test regardless.
   tests = %w[pstepper_test pstepper_signal_test pstepper_thread_test
              pstepper_xsave_test].map do |t|
-    b.program(name: t,
-              inputs: [b.o(src: "#{t}.c", cflags: GUEST_CFLAGS), plumbing],
-              libs: GUEST_LDLIBS)
+    prog = b.program(name: t,
+                     inputs: [b.o(src: "#{t}.c", cflags: GUEST_CFLAGS), plumbing],
+                     libs: GUEST_LDLIBS)
+    b.test(program: prog, deps: [plugin])
   end
 
   [plugin, *tests]
@@ -66,7 +80,17 @@ class NinjaBulder
   Artifact = Struct.new(:name, :build)
   OBJ = Struct.new(:src_name, :cflags)
 
-  PRECIOUS_ENVS = %w[CC CFLAGS LDFLAGS LIBS NO_GENERATOR]
+  # A test. The program to run plus how to run it. `name`/`build`
+  # delegate to the wrapped program Artifact so a Test flows through
+  # dedup_and_emit!'s `default` line and build-statement collection
+  # exactly like the bare program would; `args`/`deps` drive
+  # emit_tests!.
+  Test = Struct.new(:program, :args, :deps) do
+    def name;  program.name;  end
+    def build; program.build; end
+  end
+
+  PRECIOUS_ENVS = %w[CC CFLAGS LDFLAGS LIBS QEMU_X86_64 NO_GENERATOR]
 
   OVERRIDES = begin
                 vs = PRECIOUS_ENVS.map { |n| ENV[n] }
@@ -94,6 +118,14 @@ rule LINK_PROG
 
 rule LINK_SO
   command = #{CC} -shared -o $out #{LDFLAGS} $in ${link_libs} #{LIBS}
+
+rule RUN_TEST
+  command = ./testrunner.rb run --qemu #{better_shell_escape QEMU} --name $name $in $args
+  description = RUN $name
+
+rule AGGREGATE
+  command = ./testrunner.rb aggregate $in
+  description = CHECK
 
 rule regenerate_build_files
   command = #{__FILE__}#{OVERRIDES}
@@ -136,6 +168,7 @@ HERE
   end
 
   def dedup_and_emit!(artifacts)
+    tests = [artifacts].flatten.grep(Test)
     artifact_names = [artifacts].flatten.map(&:name).flatten
 
     statements = map_build(artifacts).flatten.uniq
@@ -162,6 +195,8 @@ HERE
       f.puts
 
       f.puts("default #{artifact_names.join(' ')}")
+
+      emit_tests!(f, tests)
     end
 
     path = File.expand_path("./build.ninja")
@@ -170,6 +205,49 @@ HERE
     else
       STDERR.puts "Wrote #{path} with overrides:#{OVERRIDES}"
     end
+  end
+
+  # `b.test(program:, deps:)` -> a Test artifact (no side effects); return it
+  # from build! alongside everything else. deps are extra implicit deps of
+  # the `.tests/<name>.trs` run edge (Artifact or plain name); args are
+  # appended to the guest command line.
+  def test(program:, args: [], deps: [])
+    Test.new(program,
+             args,
+             [deps].flatten.map {|d| d.respond_to?(:name) ? d.name : d})
+  end
+
+  # Emit `ninja check`: every test is re-run, every time (automake `make
+  # check` semantics -- no result caching). Mechanism: an inputless `phony`
+  # is perpetually dirty, so making it an implicit dep of each run edge
+  # forces the edge to re-run on every `ninja check`; `check` itself has an
+  # output nothing creates, so it too always runs -- it re-reads every .trs
+  # and refreshes test-suite.log (a real implicit output). See testrunner.rb.
+  # (Plain `ninja` is unaffected: none of this is in `default`.)
+  def emit_tests!(f, tests)
+    return if tests.empty?
+
+    trs = tests.map { |t| ".tests/#{t.name}.trs" }
+
+    f.puts
+    f.puts "build always : phony"
+    f.puts
+    tests.each do |t|
+      f.print gen_build(name: ".tests/#{t.name}.trs",
+                        rule: "RUN_TEST",
+                        inputs: t.name,
+                        extra_out: [".tests/#{t.name}.log"],
+                        extra_dep: (t.deps + %w[testrunner.rb always]).uniq,
+                        vars: { name: t.name, args: t.args.join(' ') })
+      f.puts
+    end
+
+    f.print gen_build(name: "check",
+                      rule: "AGGREGATE",
+                      inputs: trs,
+                      extra_out: %w[test-suite.log],
+                      extra_dep: %w[testrunner.rb])
+    f.puts
   end
 
   def gen_build(name:, rule:, inputs:, extra_dep: [], extra_out: [], vars: {})
@@ -268,6 +346,7 @@ HERE
     def o(**args); @parent.o(**args); end
     def program(**args); @parent.program(**args); end
     def dot_so(**args); @parent.dot_so(**args); end
+    def test(**args); @parent.test(**args); end
     def override_cflags(objs, &block); @parent.override_cflags(objs, &block); end
   end
 
@@ -278,10 +357,18 @@ HERE
   end
 end
 
-run_ninja = if ARGV[0] == 'ninja'
-              ARGV.shift
-              true
-            end
+run_ninja = false
+run_check = false
+pseudo_target = if %w[ninja check].include? ARGV[0]
+                  ARGV.shift
+                end
+if pseudo_target == 'ninja'
+  run_ninja = true
+elsif pseudo_target == 'check'
+  run_check = true
+else
+  raise "bug: pseudo_target = #{pseudo_target.inspect}" unless pseudo_target.nil?
+end
 
 unless ARGV.empty?
   overrides = {}
@@ -303,15 +390,14 @@ unless ARGV.empty?
   # updated environment
   if want_rexec
     require 'rbconfig'
-    maybe_build = run_ninja ? %w[ninja] : []
-    Kernel.exec(RbConfig.ruby, $PROGRAM_NAME, *(maybe_build + ARGV))
+    Kernel.exec(RbConfig.ruby, $PROGRAM_NAME, *(Array(pseudo_target) + ARGV))
     raise
   end
 end
 
 skip_regen = false
 
-if run_ninja
+if pseudo_target
   bf = "build.ninja"
   if File.file?(bf)
     first_line = File.open(bf, "r") { |f| f.readline }.chomp
@@ -319,7 +405,6 @@ if run_ninja
   end
   # NOTE: ninja itself will regenerate build.ninja if genbuild.rb is newer
 end
-
 unless skip_regen
   NinjaBulder.new.build! do |b|
     build! b
@@ -327,3 +412,4 @@ unless skip_regen
 end
 
 exec "ninja -v" if run_ninja
+exec "ninja -v check" if run_check

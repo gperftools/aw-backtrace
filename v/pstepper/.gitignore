@@ -4,6 +4,10 @@
 /.ninja_deps
 /.ninja_log
 
+# `ninja check` outputs
+/.tests/
+/test-suite.log
+
 # built artifacts (produced by ./genbuild.rb ninja)
 /pstepper_plugin.so
 /pstepper_test
