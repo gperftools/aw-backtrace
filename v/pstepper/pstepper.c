@@ -7,6 +7,7 @@
  * pstepper_trampoline.S for the hand-written asm this dispatches into/out
  * of.
  */
+#include <cpuid.h>
 #include <inttypes.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -26,6 +27,91 @@
 
 /* Set by pstepper_enable(); consulted by pstepper_invoke_handler() below. */
 static pstepper_handler_fn pstepper_user_handler;
+
+/*
+ * xsave/xrstor request-feature bitmap (edx:eax) used by pstepper_trampoline.S
+ * around every handler call. Process-wide: computed once by the first
+ * pstepper_enable() (well before any clone), read directly by the asm.
+ * Hidden visibility so the trampoline's RIP-relative load resolves without a
+ * GOT indirection under -pie.
+ *
+ * Contents: (host XCR0) & (FP | SSE | all vector-state components). The
+ * floor is FP|SSE|YMM = 0x7 (unlike glibc's _dl_runtime_resolve, which drops
+ * x87 -- it interposes at a call boundary where the x87 stack is ABI-dead;
+ * pstepper interposes at an arbitrary instruction boundary where it can be
+ * live). AVX-512 opmask/ZMM bits are included so the mask is already correct
+ * on a real AVX-512 host (the eventual aw-backtrace meld); they just mask
+ * away to nothing under QEMU TCG, which caps at AVX2. Deliberately excluded:
+ * MPX BND* (dead ISA), PKRU (a backtrace handler never executes WRPKRU), and
+ * AMX tile data (huge; enforced by the size check below).
+ */
+__attribute__((visibility("hidden"))) uint64_t pstepper_xsave_mask;
+
+#define PSTEPPER_XSTATE_X87        (1ull << 0)
+#define PSTEPPER_XSTATE_SSE        (1ull << 1)
+#define PSTEPPER_XSTATE_YMM        (1ull << 2)
+#define PSTEPPER_XSTATE_OPMASK     (1ull << 5)
+#define PSTEPPER_XSTATE_ZMM_HI256  (1ull << 6)
+#define PSTEPPER_XSTATE_HI16_ZMM   (1ull << 7)
+
+#define PSTEPPER_XSAVE_WANTED                                             \
+    (PSTEPPER_XSTATE_X87 | PSTEPPER_XSTATE_SSE | PSTEPPER_XSTATE_YMM |    \
+     PSTEPPER_XSTATE_OPMASK | PSTEPPER_XSTATE_ZMM_HI256 |                 \
+     PSTEPPER_XSTATE_HI16_ZMM)
+
+__attribute__((noreturn))
+static void pstepper_die(const char *msg)
+{
+    fprintf(stderr, "pstepper: %s\n", msg);
+    abort();
+}
+
+/* Compute pstepper_xsave_mask from the live XCR0. Runs in the guest, so the
+ * cpuid / xgetbv below see the guest CPU (qemu -cpu max). */
+static uint64_t pstepper_compute_xsave_mask(void)
+{
+    unsigned int eax, ebx, ecx, edx;
+    if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx) || !(ecx & (1u << 27))) {
+        pstepper_die("CPU lacks OSXSAVE -- xsave-based state save unavailable");
+    }
+
+    uint32_t xcr0_lo, xcr0_hi;
+    __asm__ volatile("xgetbv" : "=a"(xcr0_lo), "=d"(xcr0_hi) : "c"(0));
+    uint64_t xcr0 = ((uint64_t)xcr0_hi << 32) | xcr0_lo;
+
+    /* Force FP|SSE on unconditionally: it is the floor the trampoline asm
+     * assumes (a zero mask would make its xsave/xrstor silent no-ops), and
+     * SSE must be set whenever YMM is or the RFBM is invalid. */
+    return (xcr0 & PSTEPPER_XSAVE_WANTED)
+        | PSTEPPER_XSTATE_X87 | PSTEPPER_XSTATE_SSE;
+}
+
+/* Abort if the standard-format XSAVE area for `mask` would not fit the
+ * compile-time reservation in pstepper_frame.h. Precise per-component walk
+ * (CPUID.0Dh.n) rather than CPUID.0Dh.0:EBX, which counts the whole enabled
+ * XCR0 and would over-abort on, e.g., an AMX-capable host. */
+static void pstepper_check_xsave_area_fits(uint64_t mask)
+{
+    uint32_t need = 512 + 64; /* legacy area + XSAVE header, always present */
+    for (int i = 2; i < 63; i++) {
+        if (!(mask & (1ull << i))) {
+            continue;
+        }
+        unsigned int eax, ebx, ecx, edx;
+        __cpuid_count(0x0d, i, eax, ebx, ecx, edx);
+        /* standard format: ebx = byte offset in the area, eax = size */
+        if (ebx + eax > need) {
+            need = ebx + eax;
+        }
+    }
+    if (need > PSTEPPER_XSAVE_AREA_SIZE) {
+        fprintf(stderr, "pstepper: xsave area for mask 0x%" PRIx64 " needs %u "
+                "bytes, compiled reservation PSTEPPER_XSAVE_AREA_SIZE is %d -- "
+                "rebuild with a larger value\n",
+                mask, need, PSTEPPER_XSAVE_AREA_SIZE);
+        abort();
+    }
+}
 
 /*
  * The size every thread's upcall stack gets mmapped at -- set once by
@@ -88,13 +174,14 @@ static int pstepper_is_thread_exit(const pstepper_gpregs_t *regs)
 }
 
 /* The high end of an upcall stack that starts at `base`, rounded down to a
- * 16-byte boundary -- pstepper_trampoline is entered with RSP = top - 16, so
- * the top must be aligned. This is the only stack geometry the plugin is
- * told (PSTEPPER_CMD_ENABLE arg2); the base and raw size stay on this side,
- * for munmap. */
+ * 64-byte boundary. pstepper_trampoline is entered with RSP = top - 16, and
+ * its xsave area alignment is derived statically from `top` being 64-aligned
+ * (see pstepper_frame.h). This is the only stack geometry the plugin is told
+ * (PSTEPPER_CMD_ENABLE arg2); the base and raw size stay on this side, for
+ * munmap. */
 static uint64_t pstepper_upcall_top(uint64_t base)
 {
-    return (base + pstepper_upcall_stack_size) & ~(uint64_t)15;
+    return (base + pstepper_upcall_stack_size) & ~(uint64_t)63;
 }
 
 static void *pstepper_alloc_upcall_stack(uint64_t size)
@@ -139,7 +226,7 @@ __attribute__((noreturn))
 static void pstepper_do_clone_intercept(pstepper_gpregs_t *regs)
 {
     /* regs points at the base of the trampoline's full pstepper_frame_t (its
-     * gpr member is first) -- we need the fxsave area and the frame geometry
+     * gpr member is first) -- we need the xsave area and the frame geometry
      * too, so view the whole thing. */
     pstepper_frame_t *pframe = (pstepper_frame_t *)regs;
 
@@ -161,9 +248,9 @@ static void pstepper_do_clone_intercept(pstepper_gpregs_t *regs)
      * here and lets the shared trampoline epilogue restore everything.
      *
      * A real clone/clone3 gives the child a faithful copy of the parent's
-     * whole register file (GPRs + RFLAGS + FP/SSE state), overriding only
+     * whole register file (GPRs + RFLAGS + FP/vector state), overriding only
      * rax = 0 and rsp = child_stack. So copy the parent frame verbatim --
-     * GPRs and the fxsave area both -- then patch. rcx/r11, which a real
+     * GPRs and the xsave area both -- then patch. rcx/r11, which a real
      * `syscall` would also overwrite (with continue_rip and RFLAGS), are
      * left as the parent's values, matching the parent-resume path; nothing
      * downstream reads them. Safe to read pframe here: pre-fork,
@@ -174,7 +261,7 @@ static void pstepper_do_clone_intercept(pstepper_gpregs_t *regs)
     uint64_t child_frame = child_entry - 8 - PSTEPPER_FRAME_SIZE;
 
     pstepper_frame_t *cf = (pstepper_frame_t *)(uintptr_t)child_frame;
-    *cf = *pframe;                            /* GPRs + fxsave area, verbatim */
+    *cf = *pframe;                            /* GPRs + xsave area, verbatim */
     cf->gpr.rax = 0;                          /* the child's clone(2) return */
     cf->gpr.rip = continue_rip;               /* informational copies only */
     cf->gpr.rsp = child_stack_top;
@@ -260,6 +347,11 @@ void pstepper_enable(pstepper_handler_fn handler, uint64_t upcall_stack_size)
 {
     pstepper_user_handler = handler;
     pstepper_upcall_stack_size = upcall_stack_size;
+
+    /* Decide the trampoline's xsave/xrstor mask before stepping is armed --
+     * the asm reads pstepper_xsave_mask on the very first trap. */
+    pstepper_xsave_mask = pstepper_compute_xsave_mask();
+    pstepper_check_xsave_area_fits(pstepper_xsave_mask);
 
     /* Mmap this (the first / calling) thread's own upcall stack and arm
      * stepping for it. Every thread the clone hook bootstraps afterward

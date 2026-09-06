@@ -106,7 +106,7 @@ typedef struct {
                              * the trapped instruction retires after resume */
     uint64_t trampoline_pc;
     uint64_t resume_marker_pc;
-    uint64_t upcall_stack_top;  /* 16-byte aligned; trap slot is top - 16 */
+    uint64_t upcall_stack_top;  /* 64-byte aligned; trap slot is top - 16 */
     uint64_t resume_pc;     /* 0, or the exact PC we are steering back to */
     uint64_t resume_rsp;    /* the RSP that PC must resume with */
 
@@ -310,10 +310,11 @@ static bool vcpu_syscall_filter(unsigned int vcpu_index, int64_t num,
 
     switch (a1) {
     case PSTEPPER_CMD_ENABLE:
-        /* a2 = trampoline PC, a3 = upcall stack top (16-byte aligned),
-         * a4 = resuming flag, a5 = resume marker PC. */
-        if (a3 & 15) {
-            die("vcpu%u: upcall stack top 0x%" PRIx64 " is not 16-byte "
+        /* a2 = trampoline PC, a3 = upcall stack top (64-byte aligned -- the
+         * trampoline's xsave area alignment derives from it), a4 = resuming
+         * flag, a5 = resume marker PC. */
+        if (a3 & 63) {
+            die("vcpu%u: upcall stack top 0x%" PRIx64 " is not 64-byte "
                 "aligned", vcpu_index, a3);
         }
         st->reg_rsp = find_reg("rsp");

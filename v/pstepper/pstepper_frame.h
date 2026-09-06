@@ -31,23 +31,49 @@
 #define PSTEPPER_OFF_R15     112
 #define PSTEPPER_OFF_RIP     120
 #define PSTEPPER_OFF_RSP     128
-#define PSTEPPER_OFF_FXSAVE  144
+
+/*
+ * The XSAVE save area. Must be 64-byte aligned both within the frame and at
+ * runtime -- `xsave`/`xrstor` #GP on a misaligned operand (unlike `fxsave`,
+ * which only needed 16). The trampoline saves FP + SSE + AVX (and any wider
+ * vector state the host has) here around the handler call, via `xsave` with
+ * a runtime mask (pstepper_xsave_mask, computed once in pstepper_enable()).
+ * See pstepper_trampoline.S for the alignment argument tying OFF_XSAVE,
+ * FRAME_SIZE and the 64-byte-aligned upcall-stack top together.
+ */
+#define PSTEPPER_OFF_XSAVE   192
+
+/*
+ * Bytes reserved for the XSAVE area. Generously oversized on purpose: the
+ * upcall stack is 64 KiB, so the cost of over-reserving is nil, and this
+ * keeps sizeof(pstepper_frame_t) a compile-time constant (the clone hook
+ * copies a whole frame with a plain struct assignment). 3072 covers
+ * x87+SSE+AVX (832), the full AVX-512 component set (opmask + ZMM_Hi256 +
+ * Hi16_ZMM, ~2560 total in standard format) and leaves headroom for PKRU /
+ * APX. It deliberately does NOT cover AMX tile data (+8 KiB); the mask
+ * excludes AMX and pstepper_enable() aborts loudly if CPUID ever reports a
+ * required area larger than this.
+ */
+#define PSTEPPER_XSAVE_AREA_SIZE 3072
 
 /*
  * Bytes reserved on the stack for the frame (the trampoline's `sub`/`add`
- * amount) -- deliberately NOT sizeof(pstepper_frame_t): a struct containing
- * a 16-aligned member is itself forced to a size that's a multiple of 16,
- * but we need frame_size % 16 == 8. Why: the trampoline's very first
- * instruction is `pushfq` (8 bytes, done before touching RSP for the frame
- * itself, so the *original* eflags is captured before anything else can
- * disturb it), and entry RSP is 16-aligned (see pstepper_enable() in
- * pstepper.c). So after pushfq (+8) and reserving this frame, RSP must land
- * back on a 16-byte boundary for the frame's internal `call
- * pstepper_invoke_handler` to be SysV-legal. Picking a frame size
+ * amount) -- deliberately NOT sizeof(pstepper_frame_t): picking it
  * independent of sizeof() (just required to be big enough) sidesteps the
- * compiler's forced alignment padding entirely.
+ * compiler's forced struct-alignment padding, and lets us satisfy two
+ * runtime alignment constraints at once:
+ *
+ *   - The trampoline's first instruction is `pushfq` (8 bytes, before RSP
+ *     is touched for the frame), and entry RSP is the 64-byte-aligned
+ *     upcall-stack top minus 16. So after pushfq (-8) and `sub $FRAME_SIZE`,
+ *     RSP_frame = top - 24 - FRAME_SIZE. For the internal `call` to be
+ *     SysV-legal RSP_frame must be 16-aligned  =>  FRAME_SIZE % 16 == 8.
+ *   - The `xsave` operand is RSP_frame + OFF_XSAVE and must be 64-aligned.
+ *     With `top` 64-aligned that needs (FRAME_SIZE + 24 - OFF_XSAVE) % 64 == 0.
+ *
+ * FRAME_SIZE % 64 == 40 satisfies both (40 % 16 == 8, and 40 + 24 == 64).
  */
-#define PSTEPPER_FRAME_SIZE 664
+#define PSTEPPER_FRAME_SIZE 3304
 
 #ifndef __ASSEMBLER__
 
@@ -57,10 +83,10 @@
 
 typedef struct pstepper_frame {
     pstepper_gpregs_t gpr;
-    /* Padding so fxsave_area lands on a 16-byte boundary -- fxsave/fxrstor
+    /* Padding so xsave_area lands on a 64-byte boundary -- xsave/xrstor
      * fault on a misaligned operand. */
-    unsigned char _pad_to_fxsave[8];
-    unsigned char fxsave_area[512] __attribute__((aligned(16)));
+    unsigned char _pad_to_xsave[PSTEPPER_OFF_XSAVE - sizeof(pstepper_gpregs_t)];
+    unsigned char xsave_area[PSTEPPER_XSAVE_AREA_SIZE] __attribute__((aligned(64)));
 } pstepper_frame_t;
 
 _Static_assert(offsetof(pstepper_frame_t, gpr.rax) == PSTEPPER_OFF_RAX, "offset drift: rax");
@@ -80,15 +106,21 @@ _Static_assert(offsetof(pstepper_frame_t, gpr.r14) == PSTEPPER_OFF_R14, "offset 
 _Static_assert(offsetof(pstepper_frame_t, gpr.r15) == PSTEPPER_OFF_R15, "offset drift: r15");
 _Static_assert(offsetof(pstepper_frame_t, gpr.rip) == PSTEPPER_OFF_RIP, "offset drift: rip");
 _Static_assert(offsetof(pstepper_frame_t, gpr.rsp) == PSTEPPER_OFF_RSP, "offset drift: rsp");
-_Static_assert(offsetof(pstepper_frame_t, fxsave_area) == PSTEPPER_OFF_FXSAVE,
-               "offset drift: fxsave_area");
-_Static_assert(offsetof(pstepper_frame_t, fxsave_area) % 16 == 0,
-               "fxsave_area must be 16-byte aligned");
+_Static_assert(offsetof(pstepper_frame_t, xsave_area) == PSTEPPER_OFF_XSAVE,
+               "offset drift: xsave_area");
+_Static_assert(PSTEPPER_OFF_XSAVE % 64 == 0,
+               "xsave_area must be 64-byte aligned within the frame");
+_Static_assert(PSTEPPER_XSAVE_AREA_SIZE >= 576,
+               "xsave area must fit at least the legacy 512 bytes + 64-byte header");
 _Static_assert(PSTEPPER_FRAME_SIZE >= sizeof(pstepper_frame_t),
                "frame size constant must fit the real struct");
 _Static_assert(PSTEPPER_FRAME_SIZE % 16 == 8,
                "frame size + the leading pushfq must total a 16-byte "
                "multiple, for the internal call's stack alignment");
+_Static_assert((PSTEPPER_FRAME_SIZE + 24 - PSTEPPER_OFF_XSAVE) % 64 == 0,
+               "at runtime the xsave operand is (upcall_top - 24 - FRAME_SIZE) "
+               "+ OFF_XSAVE, with upcall_top 64-byte aligned; this must be a "
+               "multiple of 64 or xsave/xrstor #GP");
 
 #endif /* __ASSEMBLER__ */
 

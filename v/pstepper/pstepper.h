@@ -22,7 +22,7 @@
  * guest's registered upcall stack, points RSP there, and jumps to a
  * guest-side trampoline (pstepper_trampoline, in pstepper_trampoline.S).
  * From that point on it's ordinary guest code, running at full speed and
- * using real hardware instructions (push/mov/fxsave/pushfq) to save and
+ * using real hardware instructions (push/mov/xsave/pushfq) to save and
  * restore its own state -- the plugin never marshals a register file or
  * touches eflags itself. Resuming is a custom, otherwise-invalid
  * instruction (ud2) that the plugin recognizes by *address* (it only ever
@@ -61,10 +61,12 @@ enum pstepper_cmd {
     /*
      * arg1 = trampoline entry PC (pstepper_trampoline)
      * arg2 = upcall stack top (guest vaddr): the high end of the upcall
-     *        stack, 16-byte aligned. The trampoline is entered with
-     *        RSP = top - 16 and the trapped [RIP][RSP] pair staged there.
-     *        Only the top matters to the plugin -- it never needs the base
-     *        or the size (the guest side keeps those, for munmap).
+     *        stack, 64-byte aligned (the trampoline's xsave area alignment
+     *        derives from this -- see pstepper_frame.h). The trampoline is
+     *        entered with RSP = top - 16 and the trapped [RIP][RSP] pair
+     *        staged there. Only the top matters to the plugin -- it never
+     *        needs the base or the size (the guest side keeps those, for
+     *        munmap).
      * arg3 = resuming: 0 for a normal arm from ordinary code; nonzero if the
      *        calling thread is already running on the upcall stack and is
      *        about to resume through a pre-built trampoline frame (only the
@@ -119,10 +121,11 @@ static inline uint64_t pstepper_syscall(uint64_t cmd, uint64_t arg1,
  * General-purpose register snapshot handed to the pstepper handler. This is
  * pstepper's own minimal, portable context -- deliberately NOT glibc's
  * ucontext_t layout, since a backtracer only ever needs the integer
- * registers. FP/SIMD state and eflags are transparently preserved by the
- * trampoline around the handler call (so a real program's floating-point
- * state is never disturbed), but never exposed here. There is no promise
- * that edits made to this struct are reflected back on resume.
+ * registers. FP + full vector state (via xsave/xrstor) and eflags are
+ * transparently preserved by the trampoline around the handler call (so a
+ * real program's floating-point/SIMD state is never disturbed), but never
+ * exposed here. There is no promise that edits made to this struct are
+ * reflected back on resume.
  */
 typedef struct pstepper_gpregs {
     uint64_t rax, rbx, rcx, rdx, rsi, rdi, rbp;

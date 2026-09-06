@@ -13,20 +13,29 @@
  *      touched again until the matching restore sequence at the end.
  *   2. Open the frame (sub) and save every GPR into it via plain `mov`
  *      (never affects flags or RSP -- safe regardless of ordering), then
- *      `fxsave` for FP/SSE/AVX state (real hardware, so no risk of the
- *      lazy-condition-code correctness trap we hit marshalling eflags
- *      through the plugin's register API in the old design -- see
- *      pstepper_project memory).
+ *      `xsave` for FP + SSE + AVX (+ wider vector) state (real hardware, so
+ *      no risk of the lazy-condition-code correctness trap we hit
+ *      marshalling eflags through the plugin's register API in the old
+ *      design -- see pstepper_project memory). The save mask is a runtime
+ *      value, pstepper_xsave_mask, computed once in pstepper_enable() as
+ *      `xgetbv(0) & wanted`. The 64-byte XSAVE header is zeroed first --
+ *      `xrstor` #GP's a stale XCOMP_BV / reserved field and the frame is a
+ *      fresh dirty stack buffer each trap. Plain `xsave`, not `xsaveopt`:
+ *      the latter's modified optimization may skip writing a component it
+ *      believes still current in memory, never true for a per-trap buffer.
  *   3. Copy the floating RIP/RSP words into gpr.rip/gpr.rsp (so the
  *      handler can read them); the floating eflags word is left alone --
  *      untouched, ready to be reused as-is when we get to step 5, since
  *      nothing the handler or its callees do can reach memory *above* our
  *      frame (only below, as they push further).
  *   4. Call into the handler with a pointer to the frame's gpregs.
- *   5. On return: fxrstor, restore every GPR from the frame, close the
- *      frame (add), then `popfq` -- which both restores the real original
- *      eflags and advances RSP by 8, landing exactly on the still-intact
- *      [RIP][RSP] pair.
+ *   5. On return: `xrstor` (same mask), restore every GPR from the frame,
+ *      close the frame (add), then `popfq` -- which both restores the real
+ *      original eflags and advances RSP by 8, landing exactly on the
+ *      still-intact [RIP][RSP] pair. (A component whose XSTATE_BV bit the
+ *      `xsave` left clear -- i.e. it was in its init state at trap time --
+ *      is re-initialized by `xrstor` rather than loaded: init in, init out,
+ *      still faithful.)
  *   6. Execute the resume marker (ud2). The plugin recognizes this
  *      specific address, reads [RSP]/[RSP+8], and applies them as the new
  *      guest RIP/RSP -- completing the resume atomically from the guest's
@@ -34,9 +43,18 @@
  *
  * No dedicated scratch/frame-pointer register is needed anywhere: RSP
  * itself is the addressing base throughout, and it only moves at the
- * pushfq/sub/add/popfq points accounted for above.
+ * pushfq/sub/add/popfq points accounted for above. `xsave` needs its
+ * operand 64-byte aligned (not 16, as `fxsave` did); that is arranged
+ * purely by frame geometry -- see the alignment argument on
+ * PSTEPPER_FRAME_SIZE in pstepper_frame.h and the 64-byte-aligned upcall
+ * stack top in pstepper.c -- with no stack realignment / frame pointer.
  */
 #include "pstepper_frame.h"
+
+/* Runtime xsave/xrstor mask (edx:eax), a uint64_t defined in pstepper.c and
+ * set before stepping is ever armed. Hidden so the RIP-relative reference
+ * below resolves directly under -pie instead of going through the GOT. */
+	.extern pstepper_xsave_mask
 
 /* x86-64 raw syscall numbers (asm/unistd_64.h) -- only needed here; the C
  * side (pstepper.c) uses glibc's own SYS_* from <sys/syscall.h> instead of
@@ -66,7 +84,22 @@ pstepper_trampoline:
 	mov %r13, PSTEPPER_OFF_R13(%rsp)
 	mov %r14, PSTEPPER_OFF_R14(%rsp)
 	mov %r15, PSTEPPER_OFF_R15(%rsp)
-	fxsave PSTEPPER_OFF_FXSAVE(%rsp)
+	/* FP + vector state. Zero the 64-byte XSAVE header (at +512 in the
+	 * area), then xsave with the runtime mask in edx:eax. rax/rdx are
+	 * already saved to the frame above, so they are free scratch here. */
+	xorl %eax, %eax
+	movq %rax, PSTEPPER_OFF_XSAVE+512+0(%rsp)
+	movq %rax, PSTEPPER_OFF_XSAVE+512+8(%rsp)
+	movq %rax, PSTEPPER_OFF_XSAVE+512+16(%rsp)
+	movq %rax, PSTEPPER_OFF_XSAVE+512+24(%rsp)
+	movq %rax, PSTEPPER_OFF_XSAVE+512+32(%rsp)
+	movq %rax, PSTEPPER_OFF_XSAVE+512+40(%rsp)
+	movq %rax, PSTEPPER_OFF_XSAVE+512+48(%rsp)
+	movq %rax, PSTEPPER_OFF_XSAVE+512+56(%rsp)
+	movq pstepper_xsave_mask(%rip), %rax
+	movq %rax, %rdx
+	shrq $32, %rdx
+	xsave PSTEPPER_OFF_XSAVE(%rsp)
 	mov PSTEPPER_FRAME_SIZE+8(%rsp), %rax
 	mov %rax, PSTEPPER_OFF_RIP(%rsp)
 	mov PSTEPPER_FRAME_SIZE+16(%rsp), %rax
@@ -83,7 +116,12 @@ pstepper_trampoline:
 	 * the frame pointer.
 	 */
 pstepper_trampoline_epilogue:
-	fxrstor PSTEPPER_OFF_FXSAVE(%rsp)
+	/* Restore FP + vector state with the same mask. rax/rdx are restored
+	 * from the frame immediately below, so clobbering them here is fine. */
+	movq pstepper_xsave_mask(%rip), %rax
+	movq %rax, %rdx
+	shrq $32, %rdx
+	xrstor PSTEPPER_OFF_XSAVE(%rsp)
 	mov PSTEPPER_OFF_RAX(%rsp), %rax
 	mov PSTEPPER_OFF_RBX(%rsp), %rbx
 	mov PSTEPPER_OFF_RCX(%rsp), %rcx

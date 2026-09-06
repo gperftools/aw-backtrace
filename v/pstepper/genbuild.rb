@@ -28,8 +28,8 @@ PLUGIN_CFLAGS = ["-Ithird_party/",
 # The trampoline asm and the plugin's fixed-address resume marker both
 # assume the guest binary is not relocated: -fno-pie to compile, -no-pie
 # to link. (Cheap to revisit -- the .S is actually PC-relative-clean.)
-GUEST_CFLAGS = %w[-fno-pie]
-GUEST_LDLIBS = %w[-no-pie]
+GUEST_CFLAGS = []
+GUEST_LDLIBS = []
 
 # A simple "executable model" of what gets built -- see the long comment on
 # the same function in aw-backtrace/genbuild.rb. `inputs:` / `src:` are
@@ -45,7 +45,8 @@ def build!(b)
 
   # Self-checking guest programs (each computes a native reference in-process
   # and compares; run them under qemu with the plugin -- see run-tests.sh).
-  tests = %w[pstepper_test pstepper_signal_test pstepper_thread_test].map do |t|
+  tests = %w[pstepper_test pstepper_signal_test pstepper_thread_test
+             pstepper_xsave_test].map do |t|
     b.program(name: t,
               inputs: [b.o(src: "#{t}.c", cflags: GUEST_CFLAGS), plumbing],
               libs: GUEST_LDLIBS)

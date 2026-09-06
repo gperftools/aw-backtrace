@@ -17,7 +17,7 @@ if [ "${1:-}" = "-n" ]; then
     runs=$2
     shift 2
 fi
-tests=${*:-"pstepper_test pstepper_signal_test pstepper_thread_test"}
+tests=${*:-"pstepper_test pstepper_signal_test pstepper_thread_test pstepper_xsave_test"}
 
 qemu=${QEMU_X86_64:-${QEMU_SRC:-../qemu}/build/qemu-x86_64}
 plugin=./pstepper_plugin.so

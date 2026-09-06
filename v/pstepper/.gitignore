@@ -9,3 +9,4 @@
 /pstepper_test
 /pstepper_signal_test
 /pstepper_thread_test
+/pstepper_xsave_test
