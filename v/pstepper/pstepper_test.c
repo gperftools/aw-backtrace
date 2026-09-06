@@ -13,12 +13,14 @@
 static volatile long g_steps_seen;
 static volatile double g_fp_seen; /* proves xmm/fp state survives round-trip */
 
-static void handler(int uxi_kind, void *info, pstepper_gpregs_t *regs)
+static void handler(int uxi_kind, void *info, ucontext_t *uc)
 {
+    const greg_t *g = uc->uc_mcontext.gregs;
     g_steps_seen++;
     if (g_steps_seen <= 5 || (g_steps_seen % 5000) == 0) {
-        fprintf(stderr, "[guest handler] step %ld: rip=0x%" PRIx64
-                " rsp=0x%" PRIx64 "\n", g_steps_seen, regs->rip, regs->rsp);
+        fprintf(stderr, "[guest handler] step %ld: rip=0x%llx rsp=0x%llx\n",
+                g_steps_seen, (unsigned long long)g[REG_RIP],
+                (unsigned long long)g[REG_RSP]);
     }
 }
 

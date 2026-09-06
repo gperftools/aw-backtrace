@@ -51,24 +51,26 @@ static int on_altstack(uint64_t sp)
     return sp >= lo && sp < lo + ALT_SIZE;
 }
 
-static void handler(int uxi_kind, void *info, pstepper_gpregs_t *regs)
+static void handler(int uxi_kind, void *info, ucontext_t *uc)
 {
     (void)uxi_kind;
     (void)info;
+    uint64_t rip = uc->uc_mcontext.gregs[REG_RIP];
+    uint64_t rsp = uc->uc_mcontext.gregs[REG_RSP];
     g_in_upcall = 1;
     g_steps++;
 
     static uint64_t last_rip, last_rsp;
     static int have_last;
-    if (have_last && regs->rip == last_rip && regs->rsp == last_rsp &&
-        !on_altstack(regs->rsp)) {
+    if (have_last && rip == last_rip && rsp == last_rsp &&
+        !on_altstack(rsp)) {
         g_double_deliveries++;
     }
-    last_rip = regs->rip;
-    last_rsp = regs->rsp;
+    last_rip = rip;
+    last_rsp = rsp;
     have_last = 1;
 
-    if (on_altstack(regs->rsp)) {
+    if (on_altstack(rsp)) {
         g_steps_on_altstack++;
     }
 

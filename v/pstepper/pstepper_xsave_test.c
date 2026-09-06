@@ -22,11 +22,11 @@
 
 static volatile long g_steps;
 
-static void handler(int uxi_kind, void *info, pstepper_gpregs_t *regs)
+static void handler(int uxi_kind, void *info, ucontext_t *uc)
 {
     (void)uxi_kind;
     (void)info;
-    (void)regs;
+    (void)uc;
     g_steps++;
     /*
      * Trash the full 256 bits of ymm0..ymm7 (vpcmpeqd sets all bits of the

@@ -103,7 +103,8 @@ enum pstepper_cmd {
  * argument -- shaped like a real sa_sigaction(int sig, siginfo_t *info,
  * void *ucontext) handler for familiarity, but this is a UXI kind, not a
  * signal number. The second argument (siginfo_t*) is always NULL -- nothing
- * populates it in this first cut. */
+ * populates it in this first cut. The third argument is a "fake"-ish
+ * ucontext_t (see pstepper_handler_fn below). */
 #define PSTEPPER_UXI_STEP 1
 
 /*
@@ -185,8 +186,28 @@ PSTEPPER_ASSERT_GREG(rip, REG_RIP);
 _Static_assert(sizeof(pstepper_gpregs_t) == (REG_RIP + 1) * sizeof(greg_t),
                "pstepper_gpregs_t is not a gap-free prefix of gregset_t");
 
+/*
+ * The registered upcall handler. Deliberately shaped like a POSIX
+ * sa_sigaction handler so the consumer above (part 3 -- a future
+ * backtrace-comparer port) can be written as if it were an ordinary signal
+ * handler and stay unaware that a QEMU plugin, rather than a kernel,
+ * delivers the context.
+ *
+ *   uxi_kind  -- PSTEPPER_UXI_* (not a signal number).
+ *   info      -- always NULL for now (analogue of siginfo_t*).
+ *   uc        -- a "fake"-ish ucontext_t. Only the integer register file is
+ *                real: uc->uc_mcontext.gregs[REG_R8..REG_RIP] hold the
+ *                trapped instruction's registers (RIP is the address of the
+ *                instruction *about to* execute). Everything else is fake --
+ *                gregs[REG_EFL] and the other scalar slots are zero,
+ *                uc_mcontext.fpregs is NULL (no FP/SIMD state is exposed,
+ *                though it is preserved transparently around the upcall),
+ *                uc_stack / uc_sigmask / uc_flags / uc_link are zeroed. The
+ *                conversion is one-way: edits the handler makes to uc are
+ *                NOT reflected back when the trapped instruction resumes.
+ */
 typedef void (*pstepper_handler_fn)(int uxi_kind, void *info,
-                                     pstepper_gpregs_t *regs);
+                                     ucontext_t *uc);
 
 /* Defined in pstepper_trampoline.S. */
 extern void pstepper_trampoline(void);

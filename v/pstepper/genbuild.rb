@@ -64,7 +64,7 @@ def build!(b)
   # testrunner.rb). The plugin .so is listed as a dep for ordering (build it
   # before running), though `ninja check` re-runs every test regardless.
   tests = %w[pstepper_test pstepper_signal_test pstepper_thread_test
-             pstepper_xsave_test].map do |t|
+             pstepper_xsave_test pstepper_ucontext_test].map do |t|
     prog = b.program(name: t,
                      inputs: [b.o(src: "#{t}.c", cflags: GUEST_CFLAGS), plumbing],
                      libs: GUEST_LDLIBS)

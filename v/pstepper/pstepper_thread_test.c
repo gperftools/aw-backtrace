@@ -47,9 +47,19 @@ static pstepper_gpregs_t g_child_first_regs;
 static volatile int g_have_parent_clone_regs;
 static volatile int g_have_child_first_regs;
 
-static void handler(int uxi_kind, void *info, pstepper_gpregs_t *regs)
+/* Copy the covered GPR prefix out of a fake ucontext_t back into the compact
+ * pstepper_gpregs_t layout -- valid because the two share a field order (the
+ * _Static_assert block in pstepper.h pins it). Lets the fidelity check below
+ * keep comparing plain `->rbx` fields. */
+static void gpregs_from_uc(pstepper_gpregs_t *out, const ucontext_t *uc)
 {
-    /* No thread-id in pstepper_gpregs_t (yet) -- distinguish threads via a
+    memcpy(out, uc->uc_mcontext.gregs, sizeof(*out));
+}
+
+static void handler(int uxi_kind, void *info, ucontext_t *uc)
+{
+    const greg_t *g = uc->uc_mcontext.gregs;
+    /* No thread-id in the context (yet) -- distinguish threads via a
      * thread-local flag computed once per thread instead. */
     static __thread int is_child = -1;
     if (is_child < 0) {
@@ -57,16 +67,16 @@ static void handler(int uxi_kind, void *info, pstepper_gpregs_t *regs)
     }
     if (is_child) {
         if (!g_have_child_first_regs) {
-            g_child_first_regs = *regs;
+            gpregs_from_uc(&g_child_first_regs, uc);
             g_have_child_first_regs = 1; /* publish after the copy */
         }
         g_child_steps_seen++;
     } else {
         /* The stepped `clone` syscall itself -- we get a step upcall for it
          * now, just before the intercept diverts. */
-        if (!g_have_parent_clone_regs && regs->rax == (uint64_t)SYS_clone
-            && (regs->rdi & PST_CLONE_THREAD)) {
-            g_parent_clone_regs = *regs;
+        if (!g_have_parent_clone_regs && g[REG_RAX] == (greg_t)SYS_clone
+            && ((uint64_t)g[REG_RDI] & PST_CLONE_THREAD)) {
+            gpregs_from_uc(&g_parent_clone_regs, uc);
             g_have_parent_clone_regs = 1;
         }
         g_main_steps_seen++;

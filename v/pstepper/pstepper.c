@@ -13,8 +13,10 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <ucontext.h>
 
 #include "pstepper.h"
 #include "pstepper_frame.h" /* pstepper_frame_t (clone-child frame building)
@@ -300,6 +302,46 @@ static void pstepper_do_exit_intercept(pstepper_gpregs_t *frame)
     pstepper_thread_exit(resume_rsp, base, size, status); /* noreturn */
 }
 
+/*
+ * Baseline conversion of a trapped-instruction register snapshot into the
+ * "fake"-ish ucontext_t the handler is given (see pstepper_handler_fn in
+ * pstepper.h for the contract). Built fresh on the upcall stack for each
+ * upcall and thrown away when the handler returns -- the conversion is
+ * strictly one-way, nothing here is ever read back to drive the resume
+ * (the trampoline epilogue restores state from the frame, which this never
+ * aliases).
+ *
+ * Only the integer register file is populated. pstepper_gpregs_t's field
+ * order is pinned to gregset_t's REG_* indices by the _Static_assert block
+ * in pstepper.h, so the GPRs go in with a single prefix memcpy rather than a
+ * field-by-field shuffle.
+ *
+ * Everything else is deliberately fake:
+ *  - fpregs = NULL, not &uc->__fpregs_mem. No FP/SIMD state is exposed here
+ *    (it is preserved transparently by the trampoline's xsave/xrstor, just
+ *    never surfaced). NULL makes a consumer that dereferences it fault
+ *    loudly instead of reading an uninitialised buffer -- do not "fix" this
+ *    to point at __fpregs_mem.
+ *  - gregs[REG_EFL] stays zero. The real eflags *is* available (the
+ *    trampoline captures it one word above the frame), so this is a
+ *    deliberate deferral, not an oversight -- a backtrace consumer does not
+ *    need it. REG_CSGSFS / REG_ERR / REG_TRAPNO / REG_OLDMASK / REG_CR2
+ *    likewise stay zero.
+ *  - uc_stack is a zeroed stack_t, not the real upcall stack geometry;
+ *    uc_sigmask is empty; uc_flags / uc_link are zero.
+ */
+static void pstepper_build_fake_ucontext(ucontext_t *uc,
+                                          const pstepper_gpregs_t *regs)
+{
+    _Static_assert(sizeof(regs->r8) == sizeof(greg_t) &&
+                   sizeof(*regs) <= sizeof(uc->uc_mcontext.gregs),
+                   "pstepper_gpregs_t does not fit gregset_t");
+
+    memset(uc, 0, sizeof(*uc));
+    memcpy(uc->uc_mcontext.gregs, regs, sizeof(*regs));
+    uc->uc_mcontext.fpregs = NULL;
+}
+
 void pstepper_invoke_handler(pstepper_gpregs_t *regs)
 {
     /*
@@ -313,7 +355,9 @@ void pstepper_invoke_handler(pstepper_gpregs_t *regs)
      * continue_rip.
      */
     if (pstepper_user_handler) {
-        pstepper_user_handler(PSTEPPER_UXI_STEP, NULL, regs);
+        ucontext_t uc;
+        pstepper_build_fake_ucontext(&uc, regs);
+        pstepper_user_handler(PSTEPPER_UXI_STEP, NULL, &uc);
     }
     if (pstepper_is_thread_clone(regs)) {
         pstepper_do_clone_intercept(regs); /* noreturn */
