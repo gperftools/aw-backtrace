@@ -20,6 +20,23 @@ struct Arch {
   static constexpr int kFPReg = DWARF_FP;
   static constexpr int kRAReg = DWARF_LR;
 
+  // Fast-path decoder constants (aw-backtrace-fastpath.h). The CIE's code and
+  // data alignment factors are checked against these rather than decoded, so
+  // the fast path accepts exactly one convention: code_align 4 -- every
+  // aarch64 instruction is 4 bytes -- with data_align -8. That is what gas
+  // (and every other assembler that has thought about it) emits. Current
+  // clang instead emits code_align 1 / data_align -4, which is not wrong but
+  // is pointlessly odd; rather than carry a second convention through the hot
+  // path we let clang-built objects fall to the slow path, which decodes the
+  // factors as LEBs and does not care, until clang is fixed.
+  //
+  // kInitialCFAOffset is 0 because the architectural CFA is sp+0: `bl` writes
+  // x30 and touches no stack. That is also why the fast path cannot use a
+  // zero cfa_offset as its failure sentinel (see FastPathFrame).
+  static constexpr int32_t kCodeAlign = 4;  // every aarch64 instruction is 4 bytes
+  static constexpr int32_t kDataAlign = -8;
+  static constexpr uint32_t kInitialCFAOffset = 0;
+
  private:
   static int to_greg(int dwarf_reg) {
     if (dwarf_reg >= 0 && dwarf_reg <= 32) {

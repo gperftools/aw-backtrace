@@ -389,7 +389,7 @@ struct NoDiag {
   // code is exactly what it was. TESTING_NO_FASTPATH / TESTING_NO_CACHE
   // force the slow / uncached path for benchmarking (see recursion-test).
   bool use_fastpath() const {
-#if __x86_64__ && !defined(TESTING_NO_FASTPATH)
+#if (defined(__x86_64__) || defined(__aarch64__)) && !defined(TESTING_NO_FASTPATH)
     return true;
 #else
     return false;
@@ -732,19 +732,35 @@ void UnwindLoopFastPath(Cursor cursor, const ucontext_t* uc, aw_backtrace_callba
         }
         // no-op
       }
-      if (info.ra.kind != RegisterRule::Kind::MemCfaRel) {
-        if (info.ra.kind == RegisterRule::Kind::Undefined) {
-          break;  // this case is specially considered as "end of chain"
+      if (PREDICT_TRUE(info.ra.kind == RegisterRule::Kind::MemCfaRel)) {
+        if (PREDICT_FALSE(!acc.TryReadPtr(AddOffset(cfa, info.ra.offset), &next_pc))) {
+          break;
         }
+      } else if (info.ra.kind == RegisterRule::Kind::InReg && uc != nullptr) {
+        // aarch64's CIE leaves the return address live in x30, so this is the
+        // ordinary shape for frame 0 of a signal capture: a leaf that never
+        // spilled it, or the window before a prologue's stp / after an
+        // epilogue's ldp. It needs a register file, hence the uc test -- and
+        // a non-leaf frame with this rule falls through to UnwindLoop, which
+        // refuses it the same way. On x86-64 the rule never arises (the CIE
+        // puts RA at CFA-8), so this branch is dead there.
+        //
+        // Handling it here rather than falling back is not an optimization:
+        // the leaf is the *first* frame, so bailing on it would hand the
+        // entire walk to UnwindLoop and the fast path would never run at all
+        // on the signal captures it exists for.
+        next_pc = Arch::GetDWARFReg(uc, info.ra.reg);
+      } else if (info.ra.kind == RegisterRule::Kind::Undefined) {
+        break;  // this case is specially considered as "end of chain"
+      } else {
         goto fallback;
-      }
-      if (PREDICT_FALSE(!acc.TryReadPtr(AddOffset(cfa, info.ra.offset), &next_pc))) {
-        break;
       }
 
       cursor.sp = cfa;
       cursor.fp = next_fp;
-      cursor.pc = next_pc;
+      // Same as UnwindLoop: a recovered return address may be PAC-signed on
+      // aarch64. Identity, and free, on x86-64.
+      cursor.pc = Arch::CleanReturnAddress(next_pc);
     }
 
     uc = nullptr;

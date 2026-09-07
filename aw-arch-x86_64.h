@@ -23,6 +23,17 @@ struct Arch {
   static constexpr int kFPReg = DWARF_RBP;
   static constexpr int kRAReg = DWARF_RIP;
 
+  // Fast-path decoder constants (aw-backtrace-fastpath.h). The CIE's code
+  // and data alignment factors are checked against these rather than
+  // decoded, so a toolchain emitting anything else falls back to the slow
+  // path instead of being mis-decoded. Every x86-64 toolchain agrees on
+  // code_align 1 / data_align -8, so the scaling folds away entirely.
+  // kInitialCFAOffset is the CFA the architectural default row implies,
+  // i.e. what `call` pushed.
+  static constexpr int32_t kCodeAlign = 1;
+  static constexpr int32_t kDataAlign = -8;
+  static constexpr uint32_t kInitialCFAOffset = 8;
+
  private:
   static int to_greg(int dwarf_reg) {
     switch (dwarf_reg) {

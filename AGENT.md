@@ -25,8 +25,10 @@ The contract:
 * Anything outside that model is an explicit, reported error, never a silent
   guess.
 * Modern Linux, glibc 2.35+ (`_dl_find_object`). x86-64 is where the testing
-  is; aarch64 builds, passes the basic tests and has its own `GuessUnwindInfo`
-  (§4.9), but no comparer and no fast path. riscv and 32-bit eventually.
+  is; aarch64 builds, passes the basic tests, and has both its own
+  `GuessUnwindInfo` (§4.9) and the fast path (§4.8) — but still no comparer,
+  so the differential sweep (§4.10) is its main oracle. riscv and 32-bit
+  eventually.
 
 ## 2. Build and test
 
@@ -179,6 +181,17 @@ Cache counters only exist when `AW_BUMP_STATS_IN_PRODUCTION` is defined —
 * `amd64-drap-test.{c,s}` — gcc 16 `-mforce-drap` output supplying
   `minimal_drap`; the pre-gcc-16 shape lives on as `minimal_drap_2` in
   `aw-backtrace-test.cc`.
+* **`fastpath-sweep-test.cc` — the fast path's only real oracle on
+  aarch64.**  Sweeps every FDE of every module the test process has
+  mapped, asks both `DoUnwindLookup` and `TryFastFrameInfo` about four
+  pcs in each, and requires that wherever the fast path answers it
+  answers *exactly* what the full decoder does. Needs no stepping
+  machinery, so unlike the comparer it runs on both arches. clang on
+  aarch64 is deliberately bypassing the strict comparison due to known
+  issue (§4.8).  Mismatches must be zero regardless; the coverage
+  percentage is only a loose floor, since the corpus is whatever
+  happens to be loaded and therefore toolchain-dependent. §4.10 for
+  the one divergence it deliberately tolerates.
 * `eh-frame-reader-test.cc` — the only place the decoder runs without a real
   process image. `Optionalize()` turns a reader `Fail()` into `std::nullopt`, so
   "must be rejected" is an `EXPECT_EQ`. Stops at the byte-level helpers.
@@ -435,10 +448,11 @@ normalizes eflags silently kills stepping.
 `aw-backtrace-fastpath.h` is a single `ALWAYS_INLINE` function that reads
 `.eh_frame_hdr`, binary-searches the FDE, and decodes just enough of the FDE+CIE
 CFI to produce a `FastPathFrame` (SP/FP-relative CFA, optional `%rbp` spill
-slot, "end of chain"). It hard-codes the encodings glibc/gcc/clang actually emit
-(`eh_frame_hdr` enc `0x1b`/`0x03`/`0x3b`, CIE `code_align 1` / `data_align -8` /
-aug `z...`, RA at CFA-8) and returns `FastPathFrame::Failure()` — not a wrong
-answer — for anything outside that. It never reports a diagnostic and owns
+slot, "end of chain"). It hard-codes the encodings the sane toolchains actually
+emit (`eh_frame_hdr` enc `0x1b`/`0x03`/`0x3b`, aug `z...`, the CIE alignment
+factors pinned per-arch via `Arch::kCodeAlign` / `kDataAlign` — `1`/`-8` on
+x86-64, `4`/`-8` on aarch64) and returns `FastPathFrame::Failure()` — not a
+wrong answer — for anything outside that. It never reports a diagnostic and owns
 nothing; the bounds math (`Access`, `kSmallBump`, `kSlop`) is what keeps a
 malformed `.eh_frame` from walking off the section.
 
@@ -465,6 +479,57 @@ succeeded, and `uc` is cleared after that — so when the fast path hands off,
 `UnwindLoop` recomputes the same `is_leaf` and `lookup_pc` and continues from a
 cursor that still describes the frame the fast path already reported. Committing
 `cursor.fp` early used to leave the two halves describing different frames.
+
+**What is per-arch, and what the encoding buys.** Everything the decoder
+assumes about the target lives in `Arch` (`kCodeAlign`, `kDataAlign`,
+`kInitialCFAOffset`, the register numbers) rather than in `#if`s. Three of
+those matter because aarch64 broke assumptions x86-64 had let stand, or —
+for the alignment factors — because its toolchains disagree:
+
+* **A zero CFA offset is real.** aarch64's architectural CFA is `sp+0` — the
+  whole CIE program is `def_cfa sp, 0`, and `DW_CFA_def_cfa_offset: 0` closes
+  every epilogue — so `cfa_offset == 0` cannot double as "invalid" the way it
+  did on x86-64. `FastPathFrame`'s flags therefore live in the bottom three
+  bits of `fp_offset`, which are dead anyway (spill offsets are 8-aligned):
+  `kFlagFPBased`, `kFlagValid`, `kFlagEndOfChain`. That keeps the struct at 8
+  bytes — one register, so `remember_state`/`restore_state` are register moves
+  — and it keeps tags out of `cfa_offset`, which makes `DW_CFA_def_cfa_offset`
+  (the most frequent state-mutating opcode by a wide margin) a plain store
+  instead of a read-modify-write, and lets `ToFrameInfo` use `cfa_offset`
+  unmasked on both the SP and FP branches. The `static_assert`s on size and
+  `has_unique_object_representations` are what hold that in place.
+* **`ra_offset` is live, and zero means "the architectural default".**
+  Not "at CFA-8" — `Arch::ResetFrameInfo` supplies the real rule, which is
+  CFA-8 on x86-64 and *live in x30* on aarch64. That is what makes
+  `DW_CFA_offset`/`DW_CFA_restore` on the RA column arch-neutral.
+* **The CIE alignment factors are pinned per-arch, to one pair.** The four
+  CIE bytes (`0`, `code_align`, `data_align`, `ret_reg`) are `memcmp`'d
+  against the single triple the arch's assembler emits — `1 / -8` on x86-64,
+  `4 / -8` on aarch64 — never decoded as LEBs, so `kCodeAlign` and
+  `kDataAlign` stay compile-time constants and the scaling constant-folds on
+  both arches. aarch64 clang is the wrinkle: it emits `code_align 1 /
+  data_align -4` at every `-O` level, which is legal but gratuitously
+  different from what gas does, so clang-built objects miss the fast path and
+  take the slow one (which decodes the factors and does not care). That is
+  ~30 points of sweep coverage on a clang-heavy corpus, accepted on the bet
+  that clang gets fixed; a `kHasAltCFIAlignment` branch that carried both
+  conventions through the hot loop existed briefly and was removed as not
+  worth the weight.
+
+`DW_CFA_AARCH64_negate_ra_state` is accepted as a no-op, matching
+`eh-frame-reader.h`. This is not optional on aarch64: gcc emits it as the
+second instruction of nearly every FDE under `-mbranch-protection`, the distro
+default, so rejecting it would have failed essentially all of glibc.
+
+**The leaf frame needs RA-in-register, and that is a correctness requirement,
+not an optimization.** aarch64's CIE leaves the return address in x30, so a
+leaf — or the window before a prologue's `stp` / after an epilogue's `ldp` — is
+`RegisterRule::InReg(30)`. `UnwindLoopFastPath` reads it out of the `ucontext`.
+Bailing instead would bail on *frame 0* of every signal capture and hand the
+whole walk to `UnwindLoop`, i.e. the fast path would never run at all on the
+profiler captures it exists for. The step also runs `Arch::CleanReturnAddress`
+on the recovered pc, as `UnwindLoop` does — identity on x86-64, PAC-stripping
+on aarch64.
 
 **It is on the diagnostics path too, not just production.** Both loops are
 templated on the `NoDiag`/`RuntimeDiag` policy; `RuntimeDiag::use_fastpath()` /
@@ -539,6 +604,34 @@ scratch space off sp keeps x30 live, so the caller's pc comes back right, but
 CFA == sp is then wrong by the size of that area and everything below the
 recovered frame is garbage.
 
+### 4.10 The differential sweep, and the one divergence it allows
+
+The fast path's whole contract is *agree with `DoUnwindLookup`, or fail*, and
+that is checkable without any of the machinery the comparer needs — which is
+the point, because the comparer is x86-64 only. `fastpath-sweep-test.cc` walks
+the `.eh_frame_hdr` search table of every loaded module for probe pcs, runs
+both decoders, and demands an exact `FrameInfo` match. It is the reason the
+aarch64 fast path can be trusted at all, and it is a better oracle for *this
+component* than the comparer is, on either arch.
+
+Two comparisons are deliberately not exact:
+
+* **Both saying "the walk stops" is a match** however they spell it. When
+  `ra.kind == Undefined` neither loop reads `cfa` or `fp` before breaking, so
+  the fast path's architectural-default row and the slow path's last-decoded
+  row are indistinguishable.
+* **`DW_CFA_undefined` on the RA column is a real, pre-existing asymmetry.**
+  The fast path calls it `EndOfChain` and stops. `HandleUndefined` in
+  `backtrace-core.cc` instead returns false, so `DoUnwindLookup` reports
+  `kFail` — quietly, because it is a "normal stop" — and `UnwindLoop` carries
+  on into the fallback chain, where `GuessUnwindInfo` may manufacture one more
+  frame. It shows up on exactly the frames with nothing to return to (process
+  and thread entry points, `_dl_start_user`, `clone`'s child): 12 probes out
+  of ~43k. This predates the aarch64 work and is identical on x86-64 — the
+  comparer never flagged it because the guess also fails at `_start`. The
+  sweep counts these rather than failing on them. Worth resolving one day;
+  the fast path is the one behaving as §4.2 describes.
+
 ## 5. Conventions and gotchas
 
 * C++20, 2-space indent, 120 cols, Google-ish (`.clang-format`). Emacs mode
@@ -607,14 +700,19 @@ bitfield (benign; `tag` is already masked, gcc can't see it) and two
 
 True of the tree but not in `TODO`:
 
-* **aarch64 builds and passes the basic tests, but is not release-ready** — no
+* **aarch64 builds and passes the tests, but is not release-ready** — still no
   comparer (the sim-stepper is x86-only, and `PSTATE.SS` is EL1-only, so the
   self-stepping trick cannot be ported; a comparer here needs `ptrace` or an
-  instrumentation-based shadow stack), no fast path (§4.8 dead-codes out), no
-  CI. `GuessUnwindInfo` now exists (§4.9), with `arm64-leaf-test.cc` behind it,
-  but its accuracy is unmeasured — see the differ below. Still easy to break
-  without noticing from an x86 box, since nothing in the default build compiles
-  it; `aarch64-linux-gnu-g++ -c` on the core sources is a cheap smoke test.
+  instrumentation-based shadow stack), and no CI. What it does have now:
+  `GuessUnwindInfo` (§4.9) with `arm64-leaf-test.cc` behind it, the fast path
+  (§4.8), and the differential sweep (§4.10) holding the latter honest at
+  ~43k probes and ~99% coverage in a gcc build (60% under clang, by design —
+  §4.8). `GuessUnwindInfo`'s accuracy is still
+  unmeasured — see the guess-vs-CFI differ below, which is the same idea as
+  the sweep applied to the other half. Still easy to break without noticing
+  from an x86 box, since nothing in the default build compiles it;
+  `aarch64-linux-gnu-g++ -c` on the core sources is a cheap smoke test (and
+  `x86_64-linux-gnu-g++ -c` is the reverse one from an arm64 box).
 * **No guess-vs-CFI differ.** The cheapest oracle available for §4.9, and it
   works on either arch: for every frame where `DoUnwindLookup` succeeded, also
   run `GuessUnwindInfo` and diff the resulting cursor step. That measures the
@@ -644,7 +742,13 @@ True of the tree but not in `TODO`:
   something else. Nothing in the current corpus exercises the difference.
 * `//perf-convert`'s `SelfTest.SweepOwnFDEs` is a threshold over the *test
   binary's own* FDEs, so its bound moves with the toolchain — it has already had
-  to be widened once. A fixed input would be better.
+  to be widened once. A fixed input would be better. Now largely subsumed by
+  `fastpath-sweep-test` (§4.10), which sweeps more and actually compares
+  answers rather than counting failures.
+* **`//perf-convert` is still `target_compatible_with` x86_64 only**, and the
+  fast path was the reason — it links `//:aw-fastpath` and nothing else of the
+  unwinder. That blocker is gone; what remains is checking `perf.data` parsing
+  for its own arch assumptions.
 
 ### Loose ends the first release shipped with
 

@@ -206,6 +206,22 @@ cc_test(
     ],
 )
 
+# Differential sweep of the fast-path decoder against the full one. Arch
+# independent on purpose: it is the fast path's only real oracle on aarch64,
+# where the comparer does not exist.
+cc_test(
+    name = "fastpath-sweep-test",
+    srcs = ["fastpath-sweep-test.cc"],
+    cxxopts = CXXOPTS,
+    features = ["-supports_start_end_lib"],
+    linkstatic = True,
+    deps = [
+        ":aw-backtrace",
+        ":headers",
+        "@googletest//:gtest_main",
+    ],
+)
+
 cc_test(
     name = "aw-addrcheck-test",
     srcs = ["aw-addrcheck-test.c"],
