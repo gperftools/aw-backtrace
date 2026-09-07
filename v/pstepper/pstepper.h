@@ -57,54 +57,10 @@
 #include <ucontext.h>
 #include <unistd.h>
 
-/*
- * ASCII "PSTE" -- comfortably outside the real x86-64 syscall table (which
- * tops out a bit above 500), so it can never collide with a real syscall.
- * Must fit in a 32-bit int: linux-user's do_syscall() takes `num` as a
- * plain `int`, so anything wider gets silently truncated before a plugin
- * ever sees it.
- */
-#define PSTEPPER_SYSCALL_NR 0x50535445ULL
-
-enum pstepper_cmd {
-	/*
-	 * arg1 = trampoline entry PC (pstepper_trampoline)
-	 * arg2 = upcall stack top (guest vaddr): the high end of the upcall
-	 *        stack, 64-byte aligned (the trampoline's xsave area alignment
-	 *        derives from this -- see pstepper_frame_amd64.h). The trampoline is
-	 *        entered with RSP = top - 16 and the trapped [RIP][RSP] pair
-	 *        staged there. Only the top matters to the plugin -- it never
-	 *        needs the base or the size (the guest side keeps those, for
-	 *        munmap).
-	 * arg3 = resuming: 0 for a normal arm from ordinary code; nonzero if
-	 * the calling thread is already running on the upcall stack and is
-	 *        about to resume through a pre-built trampoline frame (only the
-	 *        clone hook's bootstrap does this). When nonzero the plugin
-	 *        starts the vCPU in its "trap parked" state, so the bootstrap
-	 *        tail and first resume are not treated as steppable.
-	 * arg4 = resume marker PC (pstepper_resume_marker, the `ud2` inside the
-	 *        trampoline) -- the plugin recognizes execution reaching this
-	 *        exact address as "pop [RSP]/[RSP+8] into RIP/RSP and resume",
-	 *        rather than as a real illegal-instruction fault.
-	 *
-	 * Arms single-stepping for the calling thread. The upcall stack must be
-	 * sized generously -- as with a POSIX sigaltstack, the entire handler
-	 * call chain (trampoline, the user handler, anything it calls) runs on
-	 * it.
-	 */
-	PSTEPPER_CMD_ENABLE = 1,
-
-	/* Disarms single-stepping for the calling thread. */
-	PSTEPPER_CMD_DISABLE = 3,
-};
-
-/* The (currently only) kind of UXI, handed to the handler in its first
- * argument -- shaped like a real sa_sigaction(int sig, siginfo_t *info,
- * void *ucontext) handler for familiarity, but this is a UXI kind, not a
- * signal number. The second argument (siginfo_t*) is always NULL -- nothing
- * populates it in this first cut. The third argument is a "fake"-ish
- * ucontext_t (see pstepper_handler_fn below). */
-#define PSTEPPER_UXI_STEP 1
+/* The syscall/command wire protocol -- shared verbatim with the plugin,
+ * which includes only that header (it needs none of the guest-side,
+ * target-gated machinery below). */
+#include "pstepper_abi.h"
 
 // Makes PSTEPPER_SYSCALL_NR syscall
 uint64_t pstepper_syscall(uint64_t cmd, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4);
