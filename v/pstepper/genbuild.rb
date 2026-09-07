@@ -17,7 +17,8 @@
 # See testrunner.rb for the check machinery.
 #
 # Overridable via the environment (see PRECIOUS_ENVS): CC, CFLAGS, LDFLAGS,
-# LIBS, QEMU_X86_64 (the qemu-x86_64 `ninja check` runs tests under).
+# LIBS, QEMU_X86_64 / QEMU_AARCH64 (the qemu-<arch> `ninja check` runs tests
+# under -- only the one matching the target arch is consulted).
 
 require 'digest/md5'
 require 'shellwords'
@@ -29,15 +30,38 @@ LDFLAGS = ENV['LDFLAGS'] || ''
 LIBS = ENV['LIBS'] || ''
 CC = ENV['CC'] || 'cc'
 
-# qemu-x86_64 the tests run under (`ninja check`). Baked into build.ninja via
-# the RUN_TEST rule, so pointing at a different binary re-runs every test.
-# Override with QEMU_X86_64=... -- it's a PRECIOUS_ENV, the script re-execs.
-QEMU = ENV['QEMU_X86_64'] || '../qemu/build/qemu-x86_64'
+# Target architecture, straight from the compiler ($CC -dumpmachine). Drives
+# which guest-plumbing variant is compiled (pstepper_<arch>.{c,h},
+# pstepper_trampoline_<arch>.S, pstepper_frame_<arch>.h) and which qemu-<arch>
+# runs the tests. Go-style suffix (amd64 / arm64), matching the checked-in
+# files. The plugin .so is host-native and target-neutral -- it is not
+# affected.
+TARGET_TUPLE = begin
+                 `#{CC} -dumpmachine`.chomp
+               rescue Errno::ENOENT
+                 abort "genbuild.rb: compiler #{CC.inspect} not found (set CC=)"
+               end
+ARCH = case TARGET_TUPLE
+       when /\A(x86_64|amd64)(-|\z)/  then 'amd64'
+       when /\A(aarch64|arm64)(-|\z)/ then 'arm64'
+       else
+         abort "genbuild.rb: unsupported target #{TARGET_TUPLE.inspect} from " \
+               "`#{CC} -dumpmachine` (known: x86_64, aarch64)"
+       end
 
-# -D_GNU_SOURCE: pstepper_amd64.h (pulled in via pstepper.h) includes
+# qemu-<arch> the tests run under (`ninja check`). Baked into build.ninja via
+# the RUN_TEST rule, so pointing at a different binary re-runs every test.
+# Override with QEMU_X86_64=... / QEMU_AARCH64=... -- both are PRECIOUS_ENVs,
+# the script re-execs.
+QEMU_ENV, QEMU_GUEST = { 'amd64' => %w[QEMU_X86_64 x86_64],
+                         'arm64' => %w[QEMU_AARCH64 aarch64] }.fetch(ARCH)
+QEMU = ENV[QEMU_ENV] || "../qemu/build/qemu-#{QEMU_GUEST}"
+
+# -D_GNU_SOURCE: pstepper_<arch>.h (pulled in via pstepper.h) includes
 # <ucontext.h> and _Static_asserts its pstepper_gpregs_t field order against
-# gregset_t's REG_* indices, which glibc only exposes under __USE_GNU. Both the
-# guest plumbing and the plugin include pstepper.h, so both need it.
+# the platform mcontext layout, which glibc only exposes under __USE_GNU. The
+# guest plumbing needs it for that; the plugin includes only pstepper_abi.h
+# but keeps the flag for a uniform command line.
 PLUGIN_CFLAGS = ["-D_GNU_SOURCE",
                  "-Ithird_party/",
                  `pkg-config --cflags glib-2.0`.chomp].join(' ')
@@ -49,10 +73,11 @@ GUEST_LDLIBS = []
 # the same function in aw-backtrace/genbuild.rb. `inputs:` / `src:` are
 # auto-flattened, so a lone string or a (nested) array both work.
 def build!(b)
-  # Guest-side plumbing, linked into every test program. Portable core plus
-  # the amd64 slice (pstepper_amd64.{c,S}) -- no arch detection here yet, the
-  # _amd64 files are just listed directly.
-  plumbing = b.o(src: %w[pstepper.c pstepper_amd64.c pstepper_trampoline_amd64.S], cflags: GUEST_CFLAGS)
+  # Guest-side plumbing, linked into every test program. Portable core
+  # (pstepper.c) plus the arch slice for ARCH -- pstepper_<arch>.c and its
+  # hand-written trampoline pstepper_trampoline_<arch>.S.
+  plumbing = b.o(src: ["pstepper.c", "pstepper_#{ARCH}.c", "pstepper_trampoline_#{ARCH}.S"],
+                 cflags: GUEST_CFLAGS)
 
   # The plugin. dot_so compiles -fPIC and links -shared. Only this TU sees
   # the qemu / glib headers.
@@ -65,8 +90,13 @@ def build!(b)
   # `.tests/<name>.trs` run edges + the `check` target (see emit_tests! /
   # testrunner.rb). The plugin .so is listed as a dep for ordering (build it
   # before running), though `ninja check` re-runs every test regardless.
-  tests = %w[pstepper_test pstepper_signal_test pstepper_thread_test
-             pstepper_xsave_test pstepper_ucontext_test].map do |t|
+  #
+  # pstepper_xsave_test / pstepper_ucontext_test are x86-64-specific (xsave
+  # area; the gregset_t REG_* mapping). arm64 covers FP round-tripping via
+  # the other tests and needs its own ucontext test later.
+  test_names = %w[pstepper_test pstepper_signal_test pstepper_thread_test]
+  test_names += %w[pstepper_xsave_test pstepper_ucontext_test] if ARCH == 'amd64'
+  tests = test_names.map do |t|
     prog = b.program(name: t,
                      inputs: [b.o(src: "#{t}.c", cflags: GUEST_CFLAGS), plumbing],
                      libs: GUEST_LDLIBS)
@@ -97,7 +127,7 @@ class NinjaBulder
     def build; program.build; end
   end
 
-  PRECIOUS_ENVS = %w[CC CFLAGS LDFLAGS LIBS QEMU_X86_64 NO_GENERATOR]
+  PRECIOUS_ENVS = %w[CC CFLAGS LDFLAGS LIBS QEMU_X86_64 QEMU_AARCH64 NO_GENERATOR]
 
   OVERRIDES = begin
                 vs = PRECIOUS_ENVS.map { |n| ENV[n] }
@@ -207,6 +237,7 @@ HERE
     end
 
     path = File.expand_path("./build.ninja")
+    STDERR.puts "Target: #{ARCH} (#{TARGET_TUPLE}); qemu: #{QEMU}"
     if OVERRIDES.empty?
       STDERR.puts "Wrote #{path}"
     else

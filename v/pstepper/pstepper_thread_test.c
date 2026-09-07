@@ -32,6 +32,7 @@
 
 #define ITERATIONS 40
 #define PST_CLONE_THREAD 0x00010000UL
+#define UPCALL_SIZE (64 * 1024) /* each worker's upcall stack */
 
 static volatile long g_main_steps_seen;
 static volatile long g_child_steps_seen;
@@ -54,12 +55,31 @@ static volatile int g_have_child_first_regs;
  * keep comparing plain `->rbx` fields. */
 static void gpregs_from_uc(pstepper_gpregs_t *out, const ucontext_t *uc)
 {
+#if defined(__x86_64__)
 	memcpy(out, uc->uc_mcontext.gregs, sizeof(*out));
+#elif defined(__aarch64__)
+	memcpy(out, &uc->uc_mcontext.regs[0], sizeof(*out));
+#else
+#error "no register accessors for this arch"
+#endif
+}
+
+/* Is the trapped instruction a CLONE_THREAD clone(2) about to happen? */
+static int uc_is_thread_clone(const ucontext_t *uc)
+{
+#if defined(__x86_64__)
+	const greg_t *g = uc->uc_mcontext.gregs;
+	return g[REG_RAX] == (greg_t)SYS_clone && ((uint64_t)g[REG_RDI] & PST_CLONE_THREAD);
+#elif defined(__aarch64__)
+	return uc->uc_mcontext.regs[8] == (unsigned long long)SYS_clone &&
+	       (uc->uc_mcontext.regs[0] & PST_CLONE_THREAD);
+#else
+#error "no register accessors for this arch"
+#endif
 }
 
 static void handler(int uxi_kind, void *info, ucontext_t *uc)
 {
-	const greg_t *g = uc->uc_mcontext.gregs;
 	/* No thread-id in the context (yet) -- distinguish threads via a
 	 * thread-local flag computed once per thread instead. */
 	static __thread int is_child = -1;
@@ -75,8 +95,7 @@ static void handler(int uxi_kind, void *info, ucontext_t *uc)
 	} else {
 		/* The stepped `clone` syscall itself -- we get a step upcall
 		 * for it now, just before the intercept diverts. */
-		if (!g_have_parent_clone_regs && g[REG_RAX] == (greg_t)SYS_clone &&
-		    ((uint64_t)g[REG_RDI] & PST_CLONE_THREAD)) {
+		if (!g_have_parent_clone_regs && uc_is_thread_clone(uc)) {
 			gpregs_from_uc(&g_parent_clone_regs, uc);
 			g_have_parent_clone_regs = 1;
 		}
@@ -104,6 +123,7 @@ static int check_clone_reg_fidelity(void)
 		}                                                                                                      \
 	} while (0)
 
+#if defined(__x86_64__)
 	CHECK(rbx);
 	CHECK(rbp);
 	CHECK(r12);
@@ -118,12 +138,28 @@ static int check_clone_reg_fidelity(void)
 	CHECK(r10);
 	CHECK(rcx);
 	CHECK(r11);
-#undef CHECK
 
 	if (c->rax != 0) {
 		fprintf(stderr, "[guest]   child rax = 0x%" PRIx64 ", expected 0\n", c->rax);
 		bad++;
 	}
+#elif defined(__aarch64__)
+	/* A real clone copies the whole integer file to the child, overriding
+	 * only x0 (-> 0) and SP (-> newsp); PC legitimately advances. So x1..x30
+	 * must match parent-at-svc exactly. */
+	for (int i = 1; i <= 30; i++) {
+		if (p->x[i] != c->x[i]) {
+			fprintf(stderr, "[guest]   mismatch x%-2d parent=0x%" PRIx64 " child=0x%" PRIx64 "\n", i,
+				p->x[i], c->x[i]);
+			bad++;
+		}
+	}
+	if (c->x[0] != 0) {
+		fprintf(stderr, "[guest]   child x0 = 0x%" PRIx64 ", expected 0\n", c->x[0]);
+		bad++;
+	}
+#endif
+#undef CHECK
 	return bad;
 }
 
@@ -167,14 +203,39 @@ static long vm_size_kb(void)
 	return kb;
 }
 
+/* Count private, anonymous mappings exactly UPCALL_SIZE bytes long -- one per
+ * live upcall stack. This is the direct signal the exit hook works: it must
+ * not grow with the iteration count. (VmSize is a coarser proxy -- under
+ * qemu-user its jitter is megabytes, far above a single 64 KiB stack, so on
+ * aarch64 only this count is asserted.) */
+static long count_upcall_maps(void)
+{
+	FILE *f = fopen("/proc/self/maps", "r");
+	if (!f) {
+		perror("[guest] fopen(/proc/self/maps)");
+		return -1;
+	}
+	char line[512];
+	long n = 0;
+	while (fgets(line, sizeof(line), f)) {
+		unsigned long lo, hi;
+		if (sscanf(line, "%lx-%lx", &lo, &hi) == 2 && (hi - lo) == UPCALL_SIZE && !strchr(line, '/')) {
+			n++;
+		}
+	}
+	fclose(f);
+	return n;
+}
+
 int main(void)
 {
 	g_main_tid_marker = pthread_self();
 
 	fprintf(stderr, "[guest] arming pstepper\n");
-	pstepper_enable(handler, 65536);
+	pstepper_enable(handler, UPCALL_SIZE);
 
 	long vm_after_first = -1;
+	long maps_after_first = -1;
 	double first_result = 0.0;
 
 	for (int it = 0; it < ITERATIONS; it++) {
@@ -195,6 +256,7 @@ int main(void)
 			 * cache has warmed -- otherwise the first worker's own
 			 * stack shows up as growth. */
 			vm_after_first = vm_size_kb();
+			maps_after_first = count_upcall_maps();
 		} else if (g_child_result != first_result) {
 			fprintf(stderr, "[guest] FAIL: iter %d child result %f != %f\n", it, g_child_result,
 				first_result);
@@ -204,6 +266,8 @@ int main(void)
 
 	long vm_at_end = vm_size_kb();
 	long vm_delta = vm_at_end - vm_after_first;
+	long maps_at_end = count_upcall_maps();
+	long maps_delta = maps_at_end - maps_after_first;
 
 	pstepper_disable();
 
@@ -216,6 +280,8 @@ int main(void)
 		"[guest] VmSize after iter 0 = %ld kB, at end = %ld kB "
 		"(delta %ld kB)\n",
 		vm_after_first, vm_at_end, vm_delta);
+	fprintf(stderr, "[guest] upcall-stack mappings after iter 0 = %ld, at end = %ld (delta %ld)\n",
+		maps_after_first, maps_at_end, maps_delta);
 
 	if (!g_have_parent_clone_regs || !g_have_child_first_regs) {
 		fprintf(stderr, "[guest] FAIL: never captured %s regs\n",
@@ -228,6 +294,8 @@ int main(void)
 		return 1;
 	}
 
+#if defined(__x86_64__)
+	(void)maps_delta;
 	/* Threshold well above thread-stack-cache / allocator jitter (~100 kB
 	 * observed) and well below a real leak (ITERATIONS-1 further workers *
 	 * 64 kB ~= 2.5 MB). */
@@ -238,6 +306,21 @@ int main(void)
 			vm_delta, ITERATIONS - 1);
 		return 1;
 	}
+#elif defined(__aarch64__)
+	(void)vm_delta;
+	/* qemu-user's VmSize jitter here is megabytes -- far above a single
+	 * 64 kB stack -- so check the thing directly: the exit hook must free
+	 * each worker's upcall stack, keeping the count of upcall-stack
+	 * mappings flat (allow +1 for the last worker, whose exit may race
+	 * this measurement). */
+	if (maps_delta > 1) {
+		fprintf(stderr,
+			"[guest] FAIL: upcall-stack mappings grew by %ld across %d further "
+			"iterations -- the exit hook is not freeing them\n",
+			maps_delta, ITERATIONS - 1);
+		return 1;
+	}
+#endif
 
 	fprintf(stderr, "[guest] PASS\n");
 	return 0;

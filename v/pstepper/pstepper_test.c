@@ -17,11 +17,17 @@ static volatile double g_fp_seen; /* proves xmm/fp state survives round-trip */
 
 static void handler(int uxi_kind, void *info, ucontext_t *uc)
 {
+#if defined(__x86_64__)
 	const greg_t *g = uc->uc_mcontext.gregs;
+	unsigned long long pc = g[REG_RIP], sp = g[REG_RSP];
+#elif defined(__aarch64__)
+	unsigned long long pc = uc->uc_mcontext.pc, sp = uc->uc_mcontext.sp;
+#else
+#error "no register accessors for this arch"
+#endif
 	g_steps_seen++;
 	if (g_steps_seen <= 5 || (g_steps_seen % 5000) == 0) {
-		fprintf(stderr, "[guest handler] step %ld: rip=0x%llx rsp=0x%llx\n", g_steps_seen,
-			(unsigned long long)g[REG_RIP], (unsigned long long)g[REG_RSP]);
+		fprintf(stderr, "[guest handler] step %ld: pc=0x%llx sp=0x%llx\n", g_steps_seen, pc, sp);
 	}
 }
 

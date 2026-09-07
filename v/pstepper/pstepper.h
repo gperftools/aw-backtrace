@@ -74,6 +74,8 @@ uint64_t pstepper_syscall(uint64_t cmd, uint64_t arg1, uint64_t arg2, uint64_t a
  */
 #if defined(__x86_64__)
 #include "pstepper_amd64.h"
+#elif defined(__aarch64__)
+#include "pstepper_arm64.h"
 #else
 #error "pstepper: no register-snapshot definition for this architecture yet"
 #endif

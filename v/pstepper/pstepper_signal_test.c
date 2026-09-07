@@ -56,8 +56,15 @@ static void handler(int uxi_kind, void *info, ucontext_t *uc)
 {
 	(void)uxi_kind;
 	(void)info;
+#if defined(__x86_64__)
 	uint64_t rip = uc->uc_mcontext.gregs[REG_RIP];
 	uint64_t rsp = uc->uc_mcontext.gregs[REG_RSP];
+#elif defined(__aarch64__)
+	uint64_t rip = uc->uc_mcontext.pc;
+	uint64_t rsp = uc->uc_mcontext.sp;
+#else
+#error "no register accessors for this arch"
+#endif
 	g_in_upcall = 1;
 	g_steps++;
 
