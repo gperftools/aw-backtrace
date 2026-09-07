@@ -15,6 +15,7 @@
 /pstepper_thread_test
 /pstepper_xsave_test
 /pstepper_ucontext_test
+/pstepper_sve_test
 
 # clangd stuff
 /.cache

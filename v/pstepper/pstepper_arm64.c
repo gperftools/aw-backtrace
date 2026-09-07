@@ -20,6 +20,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/auxv.h>
 #include <sys/syscall.h>
 #include <ucontext.h>
 
@@ -34,18 +35,52 @@
 /* `svc #0` -- the only SVC encoding linux-user uses for a syscall. */
 #define PSTEPPER_SVC0_INSN 0xd4000001u
 
+#ifndef HWCAP_SVE
+#define HWCAP_SVE (1UL << 22)
+#endif
+#ifndef HWCAP2_SME
+#define HWCAP2_SME (1UL << 23)
+#endif
+
 /*
- * Arch half of pstepper_enable(), run before stepping is armed. On amd64
- * this computes the xsave mask; arm64's NEON save needs no setup.
- *
- * TODO (documented gap, see aarch64-port-plan.md): the trampoline saves
- * only V0..V31 (the low 128 bits of Z0..Z31) + FPSR/FPCR. If the guest is
- * mid-SVE computation and the handler chain calls an SVE-optimized libc
- * routine, the upper Z bits / P registers / FFR are not preserved. A guard
- * that die()s on SVE/SME actually in use belongs here.
+ * Read by pstepper_trampoline_arm64.S on every trap. Hidden so its adrp/ldr
+ * resolves directly under -pie (no GOT bounce).
+ *   pstepper_sve_vl        -- 0 if the CPU has no SVE, else VL in bytes
+ *                             (also the MUL VL stride for the Z/P save).
+ *   pstepper_sme_present   -- nonzero iff FEAT_SME; the trampoline then
+ *                             checks PSTATE for streaming mode / ZA.
+ */
+__attribute__((visibility("hidden"))) uint64_t pstepper_sve_vl;
+__attribute__((visibility("hidden"))) uint64_t pstepper_sme_present;
+
+/* `rdvl x0, #1`, defined in the .S -- UNDEFINED without SVE, so call only
+ * after the HWCAP_SVE check below. */
+extern uint64_t pstepper_sve_read_vl(void);
+
+/*
+ * Arch half of pstepper_enable(), run before stepping is armed (the
+ * trampoline reads the globals above on the very first trap). On amd64 this
+ * computes the xsave mask; here it decides whether SVE state has to be
+ * saved and at what vector length.
  */
 void pstepper_arch_prepare(void)
 {
+	/* The upcall stack must hold at least one trampoline frame with room to
+	 * spare for the handler chain. pstepper_upcall_stack_size is set by
+	 * pstepper_enable() just before this runs. */
+	if (pstepper_upcall_stack_size < PSTEPPER_FRAME_SIZE + 4096) {
+		pstepper_die("upcall stack is smaller than one trampoline frame -- pass a larger size to pstepper_enable()");
+	}
+
+	unsigned long hwcap = getauxval(AT_HWCAP);
+	if (hwcap & HWCAP_SVE) {
+		uint64_t vl = pstepper_sve_read_vl();
+		if (vl == 0 || vl % 16 != 0 || vl > PSTEPPER_SVE_VL_MAX) {
+			pstepper_die("SVE vector length out of the range the trampoline frame reserves");
+		}
+		pstepper_sve_vl = vl;
+	}
+	pstepper_sme_present = (getauxval(AT_HWCAP2) & HWCAP2_SME) ? 1 : 0;
 }
 
 /* Defined in pstepper_trampoline_arm64.S. */

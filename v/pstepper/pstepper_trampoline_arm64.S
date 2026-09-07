@@ -13,21 +13,21 @@
  *      below will overwrite it, so it must be saved up front like any GPR.)
  *   2. Copy the floating [PC][SP] words (now at sp+FRAME_SIZE{,+8}) into the
  *      frame's gpr.pc / gpr.sp so the handler can read them.
- *   3. Save NZCV (mrs), then NEON: V0..V31 + FPSR + FPCR. Real instructions,
- *      so no lazy-flag hazard like the old eflags-through-the-plugin design.
+ *   3. Save NZCV (mrs), NEON (V0..V31 + FPSR + FPCR), and -- if the CPU has
+ *      SVE -- Z0..Z31 + P0..P15 + FFR. Real instructions, so no lazy-flag
+ *      hazard. If SME is present and PSTATE says streaming mode or ZA is
+ *      active, bail: that state is not saved.
  *   4. bl pstepper_invoke_handler with x0 = &frame (== &gpr).
- *   5. On return: restore NEON, NZCV, x0..x30 from the frame (frame memory
- *      is otherwise untouched), close the frame (add sp) -- landing exactly
- *      on the still-intact [PC][SP] pair.
+ *   5. On return: restore SVE, NEON, NZCV, x0..x30 from the frame (frame
+ *      memory is otherwise untouched), close the frame (add sp) -- landing
+ *      exactly on the still-intact [PC][SP] pair.
  *   6. Execute the resume marker (brk). The plugin recognizes this address,
- *      reads [SP]/[SP+8], and installs them as the new guest PC/SP --
- *      completing the resume atomically from the guest's point of view.
+ *      reads [SP]/[SP+8], and installs them as the new guest PC/SP.
  *
  * SP is the only addressing base; it moves only at the sub/add accounted
- * for above. Nothing between `msr nzcv` and the resume marker sets flags
- * (ldr/ldp/add-immediate do not), matching the x86 "nothing between popfq
- * and ud2" rule.
+ * for above. Nothing between `msr nzcv` and the resume marker sets flags.
  */
+	.arch armv8-a+sve
 #include "pstepper_frame_arm64.h"
 
 /* arm64 raw syscall numbers (asm-generic/unistd.h) -- only needed by the
@@ -35,6 +35,13 @@
 #define PSTEPPER_NR_CLONE  220
 #define PSTEPPER_NR_MUNMAP 215
 #define PSTEPPER_NR_EXIT    93
+
+/* Set once by pstepper_arch_prepare() before stepping is ever armed. Hidden,
+ * so the adrp/ldr below resolves directly under -pie with no GOT bounce.
+ * pstepper_sve_vl: 0 if no SVE, else the vector length in bytes (also the
+ * MUL VL stride). pstepper_sme_present: nonzero iff FEAT_SME. */
+	.extern pstepper_sve_vl
+	.extern pstepper_sme_present
 
 /*
  * CFI so gdb (and any .eh_frame unwinder) can walk through an in-progress
@@ -50,7 +57,8 @@
  * nudge) and skip the caller-SP-must-exceed-callee-SP check (the guest
  * stack and the mmap'd upcall stack have no address ordering).
  *
- * DWARF regs: x0..x30 = 0..30, SP = 31, PC = 32, V0..V31 = 64..95.
+ * DWARF regs: x0..x30 = 0..30, SP = 31, PC = 32. Vector CFI (V/Z/P) is
+ * omitted -- an unwinder walking a backtrace never needs it.
  */
 	.macro guest_gpr n
 	.cfi_offset \n, (PSTEPPER_OFF_X0 + 8*\n) - PSTEPPER_FRAME_SIZE - 16
@@ -66,39 +74,17 @@ pstepper_trampoline:
 	.cfi_offset 32, -16		/* trapped PC at [CFA-16] */
 	.cfi_offset 31, -8		/* trapped SP at [CFA-8]  */
 	/* x0..x30 still live in their real registers here. */
-	.cfi_same_value 0
-	.cfi_same_value 1
-	.cfi_same_value 2
-	.cfi_same_value 3
-	.cfi_same_value 4
-	.cfi_same_value 5
-	.cfi_same_value 6
-	.cfi_same_value 7
-	.cfi_same_value 8
-	.cfi_same_value 9
-	.cfi_same_value 10
-	.cfi_same_value 11
-	.cfi_same_value 12
-	.cfi_same_value 13
-	.cfi_same_value 14
-	.cfi_same_value 15
-	.cfi_same_value 16
-	.cfi_same_value 17
-	.cfi_same_value 18
-	.cfi_same_value 19
-	.cfi_same_value 20
-	.cfi_same_value 21
-	.cfi_same_value 22
-	.cfi_same_value 23
-	.cfi_same_value 24
-	.cfi_same_value 25
-	.cfi_same_value 26
-	.cfi_same_value 27
-	.cfi_same_value 28
-	.cfi_same_value 29
-	.cfi_same_value 30
+	.irp r, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30
+	.cfi_same_value \r
+	.endr
 
-	sub	sp, sp, #PSTEPPER_FRAME_SIZE
+	/* Two instructions: the frame is larger than a single `sub sp` imm.
+	 * The CFA offset is only declared after both, so an unwinder that lands
+	 * on the exact boundary between them sees a stale CFA -- a one-insn
+	 * window in a signal-frame trampoline nobody breakpoints; not worth a
+	 * throwaway intermediate .cfi_def_cfa_offset. */
+	sub	sp, sp, #(PSTEPPER_FRAME_SIZE >> 12), lsl #12
+	sub	sp, sp, #(PSTEPPER_FRAME_SIZE & 0xfff)
 	.cfi_def_cfa_offset PSTEPPER_FRAME_SIZE + 16
 
 	stp	x0,  x1,  [sp, #PSTEPPER_OFF_X0 + 0]
@@ -118,37 +104,9 @@ pstepper_trampoline:
 	stp	x28, x29, [sp, #PSTEPPER_OFF_X0 + 224]
 	str	x30,      [sp, #PSTEPPER_OFF_X0 + 240]
 
-	guest_gpr 0
-	guest_gpr 1
-	guest_gpr 2
-	guest_gpr 3
-	guest_gpr 4
-	guest_gpr 5
-	guest_gpr 6
-	guest_gpr 7
-	guest_gpr 8
-	guest_gpr 9
-	guest_gpr 10
-	guest_gpr 11
-	guest_gpr 12
-	guest_gpr 13
-	guest_gpr 14
-	guest_gpr 15
-	guest_gpr 16
-	guest_gpr 17
-	guest_gpr 18
-	guest_gpr 19
-	guest_gpr 20
-	guest_gpr 21
-	guest_gpr 22
-	guest_gpr 23
-	guest_gpr 24
-	guest_gpr 25
-	guest_gpr 26
-	guest_gpr 27
-	guest_gpr 28
-	guest_gpr 29
-	guest_gpr 30
+	.irp r, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30
+	guest_gpr \r
+	.endr
 
 	/* floating [PC][SP] -> frame gpr.pc / gpr.sp */
 	ldr	x9, [sp, #PSTEPPER_FRAME_SIZE + 0]
@@ -182,6 +140,36 @@ pstepper_trampoline:
 	mrs	x9, fpcr
 	str	x9, [sp, #PSTEPPER_OFF_FPCR]
 
+	/* SVE: Z0..Z31 + P0..P15 + FFR, only if the CPU has it. */
+	adrp	x9, pstepper_sve_vl
+	ldr	x9, [x9, #:lo12:pstepper_sve_vl]
+	cbz	x9, .Lsve_save_done
+	add	x10, sp, #PSTEPPER_OFF_SVE
+	.irp r, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+	str	z\r, [x10, #\r, mul vl]
+	.endr
+	addvl	x11, x10, #16
+	addvl	x11, x11, #16		/* P area base = SVE base + 32*VL */
+	.irp r, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+	str	p\r, [x11, #\r, mul vl]
+	.endr
+	rdffr	p0.b			/* P0 <- FFR (real P0 already stored) */
+	addvl	x12, x11, #2		/* FFR slot = P base + 2*VL */
+	str	p0,  [x12, #0, mul vl]
+.Lsve_save_done:
+
+	/* SME: streaming mode / ZA are not saved -- bail loudly if active. */
+	adrp	x9, pstepper_sme_present
+	ldr	x9, [x9, #:lo12:pstepper_sme_present]
+	cbz	x9, .Lsme_check_done
+	mrs	x9, S3_3_C4_C2_2	/* SVCR: bit0 = SM, bit1 = ZA */
+	tst	x9, #3
+	b.eq	.Lsme_check_done
+	adrp	x0, .Lsme_msg
+	add	x0, x0, #:lo12:.Lsme_msg
+	bl	pstepper_die		/* noreturn */
+.Lsme_check_done:
+
 	mov	x0, sp
 	bl	pstepper_invoke_handler
 	/*
@@ -212,6 +200,25 @@ pstepper_trampoline_epilogue:
 	ldr	x9, [sp, #PSTEPPER_OFF_FPSR]
 	msr	fpsr, x9
 
+	/* SVE restore (mirror of the save; scratch x9..x12 are restored from
+	 * the frame with the other GPRs below). */
+	adrp	x9, pstepper_sve_vl
+	ldr	x9, [x9, #:lo12:pstepper_sve_vl]
+	cbz	x9, .Lsve_restore_done
+	add	x10, sp, #PSTEPPER_OFF_SVE
+	addvl	x11, x10, #16
+	addvl	x11, x11, #16
+	addvl	x12, x11, #2
+	ldr	p0,  [x12, #0, mul vl]	/* FFR value */
+	wrffr	p0.b
+	.irp r, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+	ldr	p\r, [x11, #\r, mul vl]
+	.endr
+	.irp r, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+	ldr	z\r, [x10, #\r, mul vl]
+	.endr
+.Lsve_restore_done:
+
 	ldr	x9, [sp, #PSTEPPER_OFF_NZCV]
 	msr	nzcv, x9
 
@@ -232,7 +239,8 @@ pstepper_trampoline_epilogue:
 	ldp	x28, x29, [sp, #PSTEPPER_OFF_X0 + 224]
 	ldr	x30,      [sp, #PSTEPPER_OFF_X0 + 240]
 
-	add	sp, sp, #PSTEPPER_FRAME_SIZE
+	add	sp, sp, #(PSTEPPER_FRAME_SIZE >> 12), lsl #12
+	add	sp, sp, #(PSTEPPER_FRAME_SIZE & 0xfff)
 	.cfi_def_cfa_offset 16		/* CFA still = upcall_top; [CFA-16]/[CFA-8]
 					 * is the [PC][SP] pair the plugin consumes */
 	.global pstepper_resume_marker
@@ -244,9 +252,23 @@ pstepper_resume_marker:
 	.size pstepper_resume_marker, . - pstepper_resume_marker
 
 /*
+ * pstepper_sve_read_vl(): `rdvl` -- the SVE vector length in bytes. Must
+ * only be called after pstepper_arch_prepare() has confirmed HWCAP_SVE;
+ * `rdvl` is UNDEFINED on a CPU without SVE.
+ */
+	.global pstepper_sve_read_vl
+	.type pstepper_sve_read_vl, %function
+pstepper_sve_read_vl:
+	.cfi_startproc
+	rdvl	x0, #1
+	ret
+	.cfi_endproc
+	.size pstepper_sve_read_vl, . - pstepper_sve_read_vl
+
+/*
  * pstepper_resume_via_frame(frame_base): resume through a ready-made
  * trampoline frame -- point SP at it and fall into the shared epilogue,
- * which restores the full GPR + NEON + NZCV file and hands the resume
+ * which restores the full GPR + SVE/NEON + NZCV file and hands the resume
  * marker the [PC][SP] pair staged just above it. Never returns. Used only
  * for a clone-bootstrapped child's first resume (frame built pre-fork by
  * pstepper_do_clone_intercept). Entered with SP already inside the child's
@@ -290,11 +312,11 @@ pstepper_clone_helper:
 	mov	x22, x3			/* child_frame_base */
 
 	/* raw clone(2) args from the parent's saved register file */
-	ldr	x0, [x19, #PSTEPPER_OFF_X0 + 0]	/* flags     (guest x0) */
-	ldr	x1, [x19, #PSTEPPER_OFF_X0 + 8]	/* newsp     (guest x1) */
+	ldr	x0, [x19, #PSTEPPER_OFF_X0 + 0]	/* flags      (guest x0) */
+	ldr	x1, [x19, #PSTEPPER_OFF_X0 + 8]	/* newsp      (guest x1) */
 	ldr	x2, [x19, #PSTEPPER_OFF_X0 + 16]	/* parent_tid (guest x2) */
-	ldr	x3, [x19, #PSTEPPER_OFF_X0 + 24]	/* tls       (guest x3) */
-	ldr	x4, [x19, #PSTEPPER_OFF_X0 + 32]	/* child_tid (guest x4) */
+	ldr	x3, [x19, #PSTEPPER_OFF_X0 + 24]	/* tls        (guest x3) */
+	ldr	x4, [x19, #PSTEPPER_OFF_X0 + 32]	/* child_tid  (guest x4) */
 	mov	x8, #PSTEPPER_NR_CLONE
 	svc	#0
 	cbz	x0, pstepper_clone_child
@@ -358,6 +380,10 @@ pstepper_thread_exit:
 	brk	#0			/* unreachable */
 	.cfi_endproc
 	.size pstepper_thread_exit, . - pstepper_thread_exit
+
+	.section .rodata
+.Lsme_msg:
+	.asciz "SVE streaming mode / ZA is active at a trap -- unsupported by the trampoline"
 
 /* Non-executable stack. */
 #if defined(__linux__) && defined(__ELF__)

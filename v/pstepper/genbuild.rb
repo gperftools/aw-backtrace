@@ -92,13 +92,17 @@ def build!(b)
   # before running), though `ninja check` re-runs every test regardless.
   #
   # pstepper_xsave_test / pstepper_ucontext_test are x86-64-specific (xsave
-  # area; the gregset_t REG_* mapping). arm64 covers FP round-tripping via
-  # the other tests and needs its own ucontext test later.
+  # area; the gregset_t REG_* mapping); pstepper_sve_test is arm64-specific
+  # (and needs SVE codegen, hence the per-file -march). arm64 covers FP
+  # round-tripping via the other tests and needs its own ucontext test later.
   test_names = %w[pstepper_test pstepper_signal_test pstepper_thread_test]
   test_names += %w[pstepper_xsave_test pstepper_ucontext_test] if ARCH == 'amd64'
+  test_names += %w[pstepper_sve_test] if ARCH == 'arm64'
   tests = test_names.map do |t|
+    cflags = GUEST_CFLAGS
+    cflags += %w[-march=armv8-a+sve] if t == 'pstepper_sve_test'
     prog = b.program(name: t,
-                     inputs: [b.o(src: "#{t}.c", cflags: GUEST_CFLAGS), plumbing],
+                     inputs: [b.o(src: "#{t}.c", cflags: cflags), plumbing],
                      libs: GUEST_LDLIBS)
     b.test(program: prog, deps: [plugin])
   end
