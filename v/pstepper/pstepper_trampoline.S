@@ -63,12 +63,73 @@
 #define PSTEPPER_SYS_MUNMAP 11
 #define PSTEPPER_SYS_EXIT   60
 
+/*
+ * .eh_frame / CFI for the trampoline and its noreturn helpers, so gdb (and
+ * any other .eh_frame-driven unwinder) can walk *through* an in-progress
+ * upcall and on into the interrupted guest code, with a faithful register
+ * file at that guest frame -- exactly the way it unwinds through a signal
+ * trampoline.
+ *
+ * Anchoring choice: the CFA is pinned to the upcall stack top -- the fixed
+ * point just above the three "floating" words the plugin and the leading
+ * pushfq leave there. That keeps every register rule a plain .cfi_offset
+ * with a constant, cpp-computed displacement (no DW_CFA_*expression /
+ * .cfi_escape):
+ *
+ *     [CFA - 16] = trapped RIP      (floating word, written by the plugin)
+ *     [CFA -  8] = trapped RSP      (floating word, written by the plugin)
+ *     [CFA - 24] = trapped RFLAGS   (the leading pushfq word; only valid
+ *                                    once pushfq has executed)
+ *     trapped GPR x -> frame slot at
+ *                  CFA + (PSTEPPER_OFF_x - PSTEPPER_FRAME_SIZE - 24)
+ *
+ * .cfi_signal_frame marks the CIE so the unwinder (a) takes the trapped RIP
+ * as an exact, not-yet-retired address -- no "return address - 1" nudge --
+ * and (b) skips the "caller's SP must exceed the callee's" monotonicity
+ * check, which would otherwise abort the step: the guest stack and the
+ * mmap'd upcall stack have no address ordering.
+ *
+ * The restore path carries no register-restore CFI on purpose: the frame
+ * memory is untouched all the way through popfq, so the save-side rules go
+ * on yielding the right values; only the CFA displacement is walked back
+ * down (after add, after popfq) to stay honest at the resume marker.
+ */
+	.macro guest_gpr reg, off
+	.cfi_offset \reg, (\off) - PSTEPPER_FRAME_SIZE - 24
+	.endm
+
 	.text
 	.global pstepper_trampoline
 	.type pstepper_trampoline, @function
 pstepper_trampoline:
+	.cfi_startproc
+	.cfi_signal_frame
+	.cfi_def_cfa %rsp, 16		/* entry RSP = upcall_top - 16 */
+	.cfi_offset %rip, -16
+	.cfi_offset %rsp, -8
+	/* GPRs are still live in their real registers here (nothing saved
+	 * yet) -- say so, so the guest frame's register file is complete even
+	 * at a breakpoint landed in this prologue. */
+	.cfi_same_value %rax
+	.cfi_same_value %rbx
+	.cfi_same_value %rcx
+	.cfi_same_value %rdx
+	.cfi_same_value %rsi
+	.cfi_same_value %rdi
+	.cfi_same_value %rbp
+	.cfi_same_value %r8
+	.cfi_same_value %r9
+	.cfi_same_value %r10
+	.cfi_same_value %r11
+	.cfi_same_value %r12
+	.cfi_same_value %r13
+	.cfi_same_value %r14
+	.cfi_same_value %r15
 	pushfq
+	.cfi_def_cfa_offset 24
+	.cfi_offset 49, -24		/* RFLAGS: DWARF reg 49, now at [CFA-24] */
 	sub $PSTEPPER_FRAME_SIZE, %rsp
+	.cfi_def_cfa_offset PSTEPPER_FRAME_SIZE+24
 	mov %rax, PSTEPPER_OFF_RAX(%rsp)
 	mov %rbx, PSTEPPER_OFF_RBX(%rsp)
 	mov %rcx, PSTEPPER_OFF_RCX(%rsp)
@@ -84,6 +145,27 @@ pstepper_trampoline:
 	mov %r13, PSTEPPER_OFF_R13(%rsp)
 	mov %r14, PSTEPPER_OFF_R14(%rsp)
 	mov %r15, PSTEPPER_OFF_R15(%rsp)
+	/* All 16 trapped GPRs are now in their frame slots and none has been
+	 * clobbered yet -- point the guest frame's register rules at them in
+	 * one batch (a single CFI row, rather than 16 interleaved ones). The
+	 * displacements are CFA-relative and CFA is fixed at the upcall top,
+	 * so these stay valid for the rest of the trampoline, restore path
+	 * included. */
+	guest_gpr %rax, PSTEPPER_OFF_RAX
+	guest_gpr %rbx, PSTEPPER_OFF_RBX
+	guest_gpr %rcx, PSTEPPER_OFF_RCX
+	guest_gpr %rdx, PSTEPPER_OFF_RDX
+	guest_gpr %rsi, PSTEPPER_OFF_RSI
+	guest_gpr %rdi, PSTEPPER_OFF_RDI
+	guest_gpr %rbp, PSTEPPER_OFF_RBP
+	guest_gpr %r8,  PSTEPPER_OFF_R8
+	guest_gpr %r9,  PSTEPPER_OFF_R9
+	guest_gpr %r10, PSTEPPER_OFF_R10
+	guest_gpr %r11, PSTEPPER_OFF_R11
+	guest_gpr %r12, PSTEPPER_OFF_R12
+	guest_gpr %r13, PSTEPPER_OFF_R13
+	guest_gpr %r14, PSTEPPER_OFF_R14
+	guest_gpr %r15, PSTEPPER_OFF_R15
 	/* FP + vector state. Zero the 64-byte XSAVE header (at +512 in the
 	 * area), then xsave with the runtime mask in edx:eax. rax/rdx are
 	 * already saved to the frame above, so they are free scratch here. */
@@ -138,11 +220,16 @@ pstepper_trampoline_epilogue:
 	mov PSTEPPER_OFF_R14(%rsp), %r14
 	mov PSTEPPER_OFF_R15(%rsp), %r15
 	add $PSTEPPER_FRAME_SIZE, %rsp
+	.cfi_def_cfa_offset 24
 	popfq
+	.cfi_def_cfa_offset 16		/* CFA still = upcall_top; at the marker
+					 * [CFA-16]/[CFA-8] is exactly the
+					 * [rip][rsp] pair the plugin consumes */
 	.global pstepper_resume_marker
 	.type pstepper_resume_marker, @function
 pstepper_resume_marker:
 	ud2
+	.cfi_endproc
 	.size pstepper_trampoline, . - pstepper_trampoline
 	.size pstepper_resume_marker, . - pstepper_resume_marker
 
@@ -178,7 +265,33 @@ pstepper_resume_marker:
 	.global pstepper_clone_helper
 	.type pstepper_clone_helper, @function
 pstepper_clone_helper:
+	.cfi_startproc
+	.cfi_signal_frame
+	/* Parent branch: the trapped guest context is the caller, reached
+	 * through the frame pointer -- rdi on entry, then r15. Same CFA
+	 * anchoring as the trampoline (upcall top). The child branch never
+	 * returns to a caller and is marked undefined at its own label. */
+	.cfi_def_cfa %rdi, PSTEPPER_FRAME_SIZE+24
+	.cfi_offset %rip, -16
+	.cfi_offset %rsp, -8
+	.cfi_offset 49, -24
 	mov %rdi, %r15   /* parent frame pointer (parent branch only) */
+	.cfi_def_cfa %r15, PSTEPPER_FRAME_SIZE+24
+	guest_gpr %rax, PSTEPPER_OFF_RAX
+	guest_gpr %rbx, PSTEPPER_OFF_RBX
+	guest_gpr %rcx, PSTEPPER_OFF_RCX
+	guest_gpr %rdx, PSTEPPER_OFF_RDX
+	guest_gpr %rsi, PSTEPPER_OFF_RSI
+	guest_gpr %rdi, PSTEPPER_OFF_RDI
+	guest_gpr %rbp, PSTEPPER_OFF_RBP
+	guest_gpr %r8,  PSTEPPER_OFF_R8
+	guest_gpr %r9,  PSTEPPER_OFF_R9
+	guest_gpr %r10, PSTEPPER_OFF_R10
+	guest_gpr %r11, PSTEPPER_OFF_R11
+	guest_gpr %r12, PSTEPPER_OFF_R12
+	guest_gpr %r13, PSTEPPER_OFF_R13
+	guest_gpr %r14, PSTEPPER_OFF_R14
+	guest_gpr %r15, PSTEPPER_OFF_R15
 	mov %rsi, %r12   /* continue_rip, already +2'd (parent branch only) */
 	mov %rdx, %r13   /* child_upcall_base (child branch only) */
 	mov %rcx, %rbx   /* child_frame_base (child branch only) */
@@ -229,12 +342,14 @@ pstepper_clone_child:
 	 * continue_rip. The child's real thread stack top is reinstalled as RSP
 	 * by the epilogue, from the frame's floating rsp word.
 	 */
+	.cfi_undefined %rip	/* new thread: no caller frame -- stop the unwind here */
 	lea -64(%rbx), %rsp
 	and $~15, %rsp
 	mov %r13, %rdi   /* pstepper_child_bootstrap arg1: upcall_stack_base */
 	mov %rbx, %rsi   /* arg2: child_frame_base */
 	call pstepper_child_bootstrap
 	ud2 /* unreachable: pstepper_child_bootstrap never returns */
+	.cfi_endproc
 	.size pstepper_clone_helper, . - pstepper_clone_helper
 
 /*
@@ -256,8 +371,16 @@ pstepper_clone_child:
 	.global pstepper_resume_via_frame
 	.type pstepper_resume_via_frame, @function
 pstepper_resume_via_frame:
+	.cfi_startproc
+	.cfi_signal_frame
+	/* A clone-bootstrapped child's first resume. These two instructions
+	 * then fall into the shared epilogue, whose own CFI rows (matched by
+	 * address) reconstruct the guest frame from here on; only this brief
+	 * window has no caller to offer. */
+	.cfi_undefined %rip
 	mov %rdi, %rsp
 	jmp pstepper_trampoline_epilogue
+	.cfi_endproc
 	.size pstepper_resume_via_frame, . - pstepper_resume_via_frame
 
 /*
@@ -276,6 +399,8 @@ pstepper_resume_via_frame:
 	.global pstepper_thread_exit
 	.type pstepper_thread_exit, @function
 pstepper_thread_exit:
+	.cfi_startproc
+	.cfi_undefined %rip	/* tail of a dying thread -- nothing above us */
 	mov %rcx, %r12          /* status -- syscall clobbers rcx; stash it */
 	and $~15, %rdi
 	mov %rdi, %rsp          /* off the upcall stack, onto the real one */
@@ -287,6 +412,7 @@ pstepper_thread_exit:
 	mov $PSTEPPER_SYS_EXIT, %eax
 	syscall
 	ud2                     /* unreachable: exit(2) never returns */
+	.cfi_endproc
 	.size pstepper_thread_exit, . - pstepper_thread_exit
 
 /* Mark the stack non-executable -- absent this, some toolchains default an
