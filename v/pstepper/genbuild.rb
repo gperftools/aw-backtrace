@@ -34,10 +34,10 @@ CC = ENV['CC'] || 'cc'
 # Override with QEMU_X86_64=... -- it's a PRECIOUS_ENV, the script re-execs.
 QEMU = ENV['QEMU_X86_64'] || '../qemu/build/qemu-x86_64'
 
-# -D_GNU_SOURCE: pstepper.h includes <sys/ucontext.h> and _Static_asserts its
-# pstepper_gpregs_t field order against gregset_t's REG_* indices, which glibc
-# only exposes under __USE_GNU. Both the guest plumbing and the plugin include
-# pstepper.h, so both need it.
+# -D_GNU_SOURCE: pstepper_amd64.h (pulled in via pstepper.h) includes
+# <ucontext.h> and _Static_asserts its pstepper_gpregs_t field order against
+# gregset_t's REG_* indices, which glibc only exposes under __USE_GNU. Both the
+# guest plumbing and the plugin include pstepper.h, so both need it.
 PLUGIN_CFLAGS = ["-D_GNU_SOURCE",
                  "-Ithird_party/",
                  `pkg-config --cflags glib-2.0`.chomp].join(' ')
@@ -49,8 +49,10 @@ GUEST_LDLIBS = []
 # the same function in aw-backtrace/genbuild.rb. `inputs:` / `src:` are
 # auto-flattened, so a lone string or a (nested) array both work.
 def build!(b)
-  # Guest-side plumbing, linked into every test program.
-  plumbing = b.o(src: %w[pstepper.c pstepper_trampoline.S], cflags: GUEST_CFLAGS)
+  # Guest-side plumbing, linked into every test program. Portable core plus
+  # the amd64 slice (pstepper_amd64.{c,S}) -- no arch detection here yet, the
+  # _amd64 files are just listed directly.
+  plumbing = b.o(src: %w[pstepper.c pstepper_amd64.c pstepper_trampoline_amd64.S], cflags: GUEST_CFLAGS)
 
   # The plugin. dot_so compiles -fPIC and links -shared. Only this TU sees
   # the qemu / glib headers.
@@ -285,9 +287,7 @@ HERE
                                   end
   end
 
-  # Both .c and .S go through the given rule -- cc -c assembles a
-  # (preprocessed) .S file directly, and pstepper_trampoline.S's only
-  # #include is a sibling header cc finds on its own.
+  # Handles .c, .cc, .S and .s, same as gcc/clang driver and make.
   def compile_o(src, rule, cflags)
     raise unless src.kind_of? String
 

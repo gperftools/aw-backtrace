@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: 0BSD
 /*
- * pstepper_trampoline's stack frame layout -- internal to the pstepper
- * implementation, not part of the guest-facing ABI in pstepper.h.
+ * pstepper_trampoline's stack frame layout (amd64) -- internal to the
+ * pstepper implementation, not part of the guest-facing ABI in pstepper.h.
  *
- * Shared between pstepper_trampoline.S (which addresses fields by these
+ * Shared between pstepper_trampoline_amd64.S (which addresses fields by these
  * plain numeric offsets -- a .S file is only preprocessed, never compiled,
  * so it can use a #define directly but could never evaluate offsetof()
  * itself) and pstepper.c (which cross-checks them against the real struct
@@ -12,8 +12,8 @@
  * runtime). The __ASSEMBLER__ guard is the standard idiom for this split --
  * gcc predefines it while preprocessing a .S file for the assembler.
  */
-#ifndef PSTEPPER_FRAME_H_
-#define PSTEPPER_FRAME_H_
+#ifndef PSTEPPER_FRAME_AMD64_H_
+#define PSTEPPER_FRAME_AMD64_H_
 
 /*
  * Field order mirrors x86-64 glibc's gregset_t -- the REG_* indices in
@@ -45,7 +45,7 @@
  * which only needed 16). The trampoline saves FP + SSE + AVX (and any wider
  * vector state the host has) here around the handler call, via `xsave` with
  * a runtime mask (pstepper_xsave_mask, computed once in pstepper_enable()).
- * See pstepper_trampoline.S for the alignment argument tying OFF_XSAVE,
+ * See pstepper_trampoline_amd64.S for the alignment argument tying OFF_XSAVE,
  * FRAME_SIZE and the 64-byte-aligned upcall-stack top together.
  */
 #define PSTEPPER_OFF_XSAVE 192
@@ -126,4 +126,4 @@ _Static_assert((PSTEPPER_FRAME_SIZE + 24 - PSTEPPER_OFF_XSAVE) % 64 == 0,
 
 #endif /* __ASSEMBLER__ */
 
-#endif /* PSTEPPER_FRAME_H_ */
+#endif /* PSTEPPER_FRAME_AMD64_H_ */

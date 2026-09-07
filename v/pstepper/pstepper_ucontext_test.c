@@ -7,7 +7,7 @@
  * What it pins down:
  *
  *  1. Every general-purpose register lands in the right gregs[] slot. The
- *     _Static_asserts in pstepper.h only prove pstepper_gpregs_t's *layout*
+ *     _Static_asserts in pstepper_amd64.h only prove pstepper_gpregs_t's *layout*
  *     matches gregset_t's; nothing static checks that the trampoline stores
  *     each machine register into the offset it claims to. So: set distinct
  *     64-bit sentinels in the callee-saved registers, call marker() with

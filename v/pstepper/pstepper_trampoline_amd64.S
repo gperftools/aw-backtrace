@@ -48,18 +48,18 @@
  * pushfq/sub/add/popfq points accounted for above. `xsave` needs its
  * operand 64-byte aligned (not 16, as `fxsave` did); that is arranged
  * purely by frame geometry -- see the alignment argument on
- * PSTEPPER_FRAME_SIZE in pstepper_frame.h and the 64-byte-aligned upcall
- * stack top in pstepper.c -- with no stack realignment / frame pointer.
+ * PSTEPPER_FRAME_SIZE in pstepper_frame_amd64.h and the 64-byte-aligned upcall
+ * stack top in pstepper_amd64.c -- with no stack realignment / frame pointer.
  */
-#include "pstepper_frame.h"
+#include "pstepper_frame_amd64.h"
 
-/* Runtime xsave/xrstor mask (edx:eax), a uint64_t defined in pstepper.c and
+/* Runtime xsave/xrstor mask (edx:eax), a uint64_t defined in pstepper_amd64.c and
  * set before stepping is ever armed. Hidden so the RIP-relative reference
  * below resolves directly under -pie instead of going through the GOT. */
 	.extern pstepper_xsave_mask
 
 /* x86-64 raw syscall numbers (asm/unistd_64.h) -- only needed here; the C
- * side (pstepper.c) uses glibc's own SYS_* from <sys/syscall.h> instead of
+ * side (pstepper_amd64.c) uses glibc's own SYS_* from <sys/syscall.h> instead of
  * sharing these definitions. */
 #define PSTEPPER_SYS_CLONE  56
 #define PSTEPPER_SYS_MUNMAP 11
@@ -195,7 +195,7 @@ pstepper_trampoline:
 	 * fall through to the usual restore-and-resume below) or diverts
 	 * internally and never returns at all -- e.g. for a trap that turned
 	 * out to be a CLONE_THREAD syscall about to happen, which it handles
-	 * entirely on the C side (see pstepper.c) before ever giving control
+	 * entirely on the C side (see pstepper_amd64.c) before ever giving control
 	 * back here. Either way RSP is unchanged since the call, so it's still
 	 * the frame pointer.
 	 */
@@ -238,7 +238,7 @@ pstepper_resume_marker:
 /*
  * pstepper_clone_helper(frame, continue_rip, child_upcall_base,
  * child_frame_base): a real (noreturn) call from
- * pstepper.c's pstepper_do_clone_intercept, which has already decided the
+ * pstepper_amd64.c's pstepper_do_clone_intercept, which has already decided the
  * trapped instruction is a CLONE_THREAD clone(2) about to happen and done
  * all the pre-fork prep -- mmapping the child's own upcall stack, computing
  * continue_rip, and building the child a complete ready-to-resume
@@ -387,7 +387,7 @@ pstepper_resume_via_frame:
 
 /*
  * pstepper_thread_exit(resume_rsp, upcall_base, upcall_size, status): the
- * noreturn tail of pstepper_do_exit_intercept (see pstepper.c). Entered
+ * noreturn tail of pstepper_do_exit_intercept (see pstepper_amd64.c). Entered
  * still standing on this thread's upcall stack, with stepping already
  * DISABLEd -- so nothing re-traps into the trampoline no matter where RSP
  * goes from here. Switch onto the thread's real stack (its value at the

@@ -21,7 +21,7 @@
  * Design (v2): the plugin itself does almost nothing. On a trap it writes
  * two words -- the trapped instruction's original RIP and RSP -- onto the
  * guest's registered upcall stack, points RSP there, and jumps to a
- * guest-side trampoline (pstepper_trampoline, in pstepper_trampoline.S).
+ * guest-side trampoline (pstepper_trampoline, in pstepper_trampoline_amd64.S).
  * From that point on it's ordinary guest code, running at full speed and
  * using real hardware instructions (push/mov/xsave/pushfq) to save and
  * restore its own state -- the plugin never marshals a register file or
@@ -38,11 +38,15 @@
  * involved; the plugin is told only the aligned top of the upcall stack.
  *
  * This header is the guest-facing ABI only: types, constants, and the
- * entry points a guest program actually calls. The trampoline itself lives
- * in pstepper_trampoline.S (hand-written asm; see pstepper_frame.h for the
- * stack frame layout it and pstepper.c both agree on), and the
- * higher-level plumbing (arming/disarming, dispatching to the registered
- * handler) lives in pstepper.c.
+ * entry points a guest program actually calls. Its arch-specific slice (the
+ * register-snapshot type) is split out into a per-arch header picked by the
+ * #ifdef block below -- pstepper_amd64.h today. The trampoline itself lives
+ * in pstepper_trampoline_amd64.S (hand-written asm; see pstepper_frame_amd64.h
+ * for the stack frame layout it and pstepper_amd64.c both agree on); the
+ * arch-specific plumbing (xsave policy, syscall-opcode recognition, the
+ * clone/exit intercepts) lives in pstepper_amd64.c, and the portable
+ * higher-level plumbing (arming/disarming, upcall-stack management) in
+ * pstepper.c.
  */
 #ifndef PSTEPPER_H_
 #define PSTEPPER_H_
@@ -67,7 +71,7 @@ enum pstepper_cmd {
 	 * arg1 = trampoline entry PC (pstepper_trampoline)
 	 * arg2 = upcall stack top (guest vaddr): the high end of the upcall
 	 *        stack, 64-byte aligned (the trampoline's xsave area alignment
-	 *        derives from this -- see pstepper_frame.h). The trampoline is
+	 *        derives from this -- see pstepper_frame_amd64.h). The trampoline is
 	 *        entered with RSP = top - 16 and the trapped [RIP][RSP] pair
 	 *        staged there. Only the top matters to the plugin -- it never
 	 *        needs the base or the size (the guest side keeps those, for
@@ -106,62 +110,17 @@ enum pstepper_cmd {
 uint64_t pstepper_syscall(uint64_t cmd, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4);
 
 /*
- * General-purpose register snapshot handed to the pstepper handler. This is
- * pstepper's own minimal, portable context -- only the integer registers,
- * since that is all a backtracer ever needs. FP + full vector state (via
- * xsave/xrstor) and eflags are transparently preserved by the trampoline
- * around the handler call (so a real program's floating-point/SIMD state is
- * never disturbed), but never exposed here. There is no promise that edits
- * made to this struct are reflected back on resume.
- *
- * The field order deliberately mirrors x86-64 glibc's gregset_t -- the
- * REG_* indices in <sys/ucontext.h> (REG_R8=0 .. REG_R15, REG_RDI, REG_RSI,
- * REG_RBP, REG_RBX, REG_RDX, REG_RAX, REG_RCX, REG_RSP, REG_RIP), and the
- * _Static_assert block below build-checks that against the real header. The
- * struct still isn't a ucontext_t (no signal mask, no FP pointer, no
- * segment/error words); the point of the correspondence is only that
- * synthesizing a "fake"-ish ucontext_t from this snapshot is a straight
- * index mapping rather than a field-by-field shuffle.
+ * Arch-specific slice of the ABI: pstepper_gpregs_t, the register snapshot
+ * handed to the handler. Picked here so the rest of this header (the handler
+ * signature, pstepper_invoke_handler) can be written against the type
+ * regardless of target. A new port adds its own pstepper_<arch>.h and another
+ * arm below.
  */
-typedef struct pstepper_gpregs {
-	uint64_t r8, r9, r10, r11, r12, r13, r14, r15;
-	uint64_t rdi, rsi, rbp, rbx, rdx, rax, rcx;
-	uint64_t rsp;
-	uint64_t rip;
-} pstepper_gpregs_t;
-
-/*
- * gregset_t is greg_t[__NGREG]; each pstepper_gpregs_t field must sit at the
- * byte offset its REG_* index would land at in that array, so a fake
- * ucontext_t is `memcpy(uc->uc_mcontext.gregs, regs, sizeof *regs)` on the
- * covered prefix. greg_t is `long long`, i.e. 8 bytes == our uint64_t.
- */
-_Static_assert(sizeof(uint64_t) == sizeof(greg_t), "greg_t is not 64-bit");
-#define PSTEPPER_ASSERT_GREG(field, reg)                                                                               \
-	_Static_assert(offsetof(pstepper_gpregs_t, field) == (reg) * sizeof(greg_t),                                   \
-		       "pstepper_gpregs_t." #field " does not match gregset_t[" #reg "]")
-PSTEPPER_ASSERT_GREG(r8, REG_R8);
-PSTEPPER_ASSERT_GREG(r9, REG_R9);
-PSTEPPER_ASSERT_GREG(r10, REG_R10);
-PSTEPPER_ASSERT_GREG(r11, REG_R11);
-PSTEPPER_ASSERT_GREG(r12, REG_R12);
-PSTEPPER_ASSERT_GREG(r13, REG_R13);
-PSTEPPER_ASSERT_GREG(r14, REG_R14);
-PSTEPPER_ASSERT_GREG(r15, REG_R15);
-PSTEPPER_ASSERT_GREG(rdi, REG_RDI);
-PSTEPPER_ASSERT_GREG(rsi, REG_RSI);
-PSTEPPER_ASSERT_GREG(rbp, REG_RBP);
-PSTEPPER_ASSERT_GREG(rbx, REG_RBX);
-PSTEPPER_ASSERT_GREG(rdx, REG_RDX);
-PSTEPPER_ASSERT_GREG(rax, REG_RAX);
-PSTEPPER_ASSERT_GREG(rcx, REG_RCX);
-PSTEPPER_ASSERT_GREG(rsp, REG_RSP);
-PSTEPPER_ASSERT_GREG(rip, REG_RIP);
-#undef PSTEPPER_ASSERT_GREG
-/* rip is the last field, and every field from REG_R8=0 up to it is covered
- * with no gaps -- so the struct is exactly a prefix of gregset_t. */
-_Static_assert(sizeof(pstepper_gpregs_t) == (REG_RIP + 1) * sizeof(greg_t),
-	       "pstepper_gpregs_t is not a gap-free prefix of gregset_t");
+#if defined(__x86_64__)
+#include "pstepper_amd64.h"
+#else
+#error "pstepper: no register-snapshot definition for this architecture yet"
+#endif
 
 /*
  * The registered upcall handler. Deliberately shaped like a POSIX
@@ -185,17 +144,20 @@ _Static_assert(sizeof(pstepper_gpregs_t) == (REG_RIP + 1) * sizeof(greg_t),
  */
 typedef void (*pstepper_handler_fn)(int uxi_kind, void *info, ucontext_t *uc);
 
-/* Defined in pstepper_trampoline.S. */
+/* Defined in pstepper_trampoline_amd64.S. Portable-named on purpose -- these
+ * are the symbol contract any arch's trampoline satisfies, so the portable
+ * arming code in pstepper.c can reference them directly. */
 extern void pstepper_trampoline(void);
 extern void pstepper_resume_marker(void);
 
 /*
- * Defined in pstepper.c; called only from pstepper_trampoline.S once it has
- * built the gpregs snapshot. Always either returns normally (an ordinary
- * step -- the trampoline falls through to its usual restore-and-resume) or
- * diverts internally and never returns at all (e.g. when the trap turns out
- * to be a CLONE_THREAD syscall about to happen, handled entirely on this
- * side before the trampoline ever gets control back).
+ * Defined in pstepper_amd64.c; called only from pstepper_trampoline_amd64.S
+ * once it has built the gpregs snapshot. Always either returns normally (an
+ * ordinary step -- the trampoline falls through to its usual
+ * restore-and-resume) or diverts internally and never returns at all (e.g.
+ * when the trap turns out to be a CLONE_THREAD syscall about to happen,
+ * handled entirely on this side before the trampoline ever gets control
+ * back).
  */
 void pstepper_invoke_handler(pstepper_gpregs_t *regs);
 
