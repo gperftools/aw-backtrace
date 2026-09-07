@@ -414,7 +414,22 @@ unless skip_regen
   NinjaBulder.new.build! do |b|
     build! b
   end
+  # Now write compile_commands.json
+  file = "compile_commands.json"
+  cmd = "ninja -t compdb >#{file}"
+  puts "$ #{cmd}"
+  system cmd
+  unless $?.success?
+    File.unlink file rescue nil
+    raise "comdb generation failed: #{$?.inspect}"
+  end
 end
 
+# NOTE: invoking ninja here may and sometimes will re-invoke
+# ./genbuild.rb as a generator (without ninja|check 'command', but
+# with PRECIOUS_ENVS). So we'd write the build file again. This is
+# harmless, if a little suprising sometimes. Why this happens? Because
+# ninja uses build.ninja mtime from it's database. So even if we just
+# produced 'fresh' copy, it will still see it stale.
 exec "ninja -v" if run_ninja
 exec "ninja -v check" if run_check

@@ -15,3 +15,7 @@
 /pstepper_thread_test
 /pstepper_xsave_test
 /pstepper_ucontext_test
+
+# clangd stuff
+/.cache
+/compile_commands.json
