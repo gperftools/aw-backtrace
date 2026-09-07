@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 /*
  * Guest test for pstepper's behaviour when POSIX signals arrive mid-step.
  *
@@ -47,57 +48,56 @@ static volatile long g_sig_in_upcall;
 
 static int on_altstack(uint64_t sp)
 {
-    uint64_t lo = (uint64_t)(uintptr_t)g_altstack;
-    return sp >= lo && sp < lo + ALT_SIZE;
+	uint64_t lo = (uint64_t)(uintptr_t)g_altstack;
+	return sp >= lo && sp < lo + ALT_SIZE;
 }
 
 static void handler(int uxi_kind, void *info, ucontext_t *uc)
 {
-    (void)uxi_kind;
-    (void)info;
-    uint64_t rip = uc->uc_mcontext.gregs[REG_RIP];
-    uint64_t rsp = uc->uc_mcontext.gregs[REG_RSP];
-    g_in_upcall = 1;
-    g_steps++;
+	(void)uxi_kind;
+	(void)info;
+	uint64_t rip = uc->uc_mcontext.gregs[REG_RIP];
+	uint64_t rsp = uc->uc_mcontext.gregs[REG_RSP];
+	g_in_upcall = 1;
+	g_steps++;
 
-    static uint64_t last_rip, last_rsp;
-    static int have_last;
-    if (have_last && rip == last_rip && rsp == last_rsp &&
-        !on_altstack(rsp)) {
-        g_double_deliveries++;
-    }
-    last_rip = rip;
-    last_rsp = rsp;
-    have_last = 1;
+	static uint64_t last_rip, last_rsp;
+	static int have_last;
+	if (have_last && rip == last_rip && rsp == last_rsp && !on_altstack(rsp)) {
+		g_double_deliveries++;
+	}
+	last_rip = rip;
+	last_rsp = rsp;
+	have_last = 1;
 
-    if (on_altstack(rsp)) {
-        g_steps_on_altstack++;
-    }
+	if (on_altstack(rsp)) {
+		g_steps_on_altstack++;
+	}
 
-    g_in_upcall = 0;
+	g_in_upcall = 0;
 }
 
 static volatile double g_sig_work = 1.5;
 
 __attribute__((noinline)) static double sig_leaf(double x)
 {
-    return x * 3.0 + 1.0;
+	return x * 3.0 + 1.0;
 }
 
 static void on_alarm(int sig)
 {
-    (void)sig;
-    int saved = errno;
-    g_sig_total++;
-    if (g_in_upcall) {
-        g_sig_in_upcall++;
-    }
-    double d = g_sig_work;
-    for (int i = 0; i < 15; i++) {
-        d = sig_leaf(d);
-    }
-    g_sig_work = d;
-    errno = saved;
+	(void)sig;
+	int saved = errno;
+	g_sig_total++;
+	if (g_in_upcall) {
+		g_sig_in_upcall++;
+	}
+	double d = g_sig_work;
+	for (int i = 0; i < 15; i++) {
+		d = sig_leaf(d);
+	}
+	g_sig_work = d;
+	errno = saved;
 }
 
 /* Call-heavy so the step stream has a dense call/return structure for the
@@ -105,92 +105,89 @@ static void on_alarm(int sig)
  * land somewhere that faults. */
 __attribute__((noinline)) static double leaf(double x, int i)
 {
-    return x * 1.0001 + (double)i;
+	return x * 1.0001 + (double)i;
 }
 
 __attribute__((noinline)) static double compute(int n)
 {
-    double acc = 1.0;
-    for (int i = 1; i <= n; i++) {
-        acc = leaf(acc, i);
-    }
-    return acc;
+	double acc = 1.0;
+	for (int i = 1; i <= n; i++) {
+		acc = leaf(acc, i);
+	}
+	return acc;
 }
 
 static double reference(int n)
 {
-    double acc = 1.0;
-    for (int i = 1; i <= n; i++) {
-        acc = acc * 1.0001 + (double)i;
-    }
-    return acc;
+	double acc = 1.0;
+	for (int i = 1; i <= n; i++) {
+		acc = acc * 1.0001 + (double)i;
+	}
+	return acc;
 }
 
 int main(void)
 {
-    stack_t ss = { .ss_sp = g_altstack, .ss_size = ALT_SIZE, .ss_flags = 0 };
-    if (sigaltstack(&ss, NULL) != 0) {
-        perror("[guest] sigaltstack");
-        return 1;
-    }
+	stack_t ss = {.ss_sp = g_altstack, .ss_size = ALT_SIZE, .ss_flags = 0};
+	if (sigaltstack(&ss, NULL) != 0) {
+		perror("[guest] sigaltstack");
+		return 1;
+	}
 
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = on_alarm;
-    sa.sa_flags = SA_ONSTACK | SA_RESTART;
-    sigemptyset(&sa.sa_mask);
-    if (sigaction(SIGALRM, &sa, NULL) != 0) {
-        perror("[guest] sigaction");
-        return 1;
-    }
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = on_alarm;
+	sa.sa_flags = SA_ONSTACK | SA_RESTART;
+	sigemptyset(&sa.sa_mask);
+	if (sigaction(SIGALRM, &sa, NULL) != 0) {
+		perror("[guest] sigaction");
+		return 1;
+	}
 
-    struct itimerval it = {
-        .it_interval = { .tv_sec = 0, .tv_usec = 1000 },
-        .it_value    = { .tv_sec = 0, .tv_usec = 1000 },
-    };
-    if (setitimer(ITIMER_REAL, &it, NULL) != 0) {
-        perror("[guest] setitimer");
-        return 1;
-    }
+	struct itimerval it = {
+		.it_interval = {.tv_sec = 0, .tv_usec = 1000},
+		.it_value = {.tv_sec = 0, .tv_usec = 1000},
+	};
+	if (setitimer(ITIMER_REAL, &it, NULL) != 0) {
+		perror("[guest] setitimer");
+		return 1;
+	}
 
-    const int n = 3000;
-    double want = reference(n);
+	const int n = 3000;
+	double want = reference(n);
 
-    fprintf(stderr, "[guest] arming pstepper\n");
-    pstepper_enable(handler, 65536);
-    double got = compute(n);
-    pstepper_disable();
+	fprintf(stderr, "[guest] arming pstepper\n");
+	pstepper_enable(handler, 65536);
+	double got = compute(n);
+	pstepper_disable();
 
-    struct itimerval off = {{0, 0}, {0, 0}};
-    setitimer(ITIMER_REAL, &off, NULL);
+	struct itimerval off = {{0, 0}, {0, 0}};
+	setitimer(ITIMER_REAL, &off, NULL);
 
-    fprintf(stderr, "[guest] steps=%ld  altstack steps=%ld  double deliveries=%ld\n",
-            g_steps, g_steps_on_altstack, g_double_deliveries);
-    fprintf(stderr, "[guest] signals: total=%ld  during upcall=%ld\n",
-            g_sig_total, g_sig_in_upcall);
-    fprintf(stderr, "[guest] compute()=%a  reference=%a\n", got, want);
+	fprintf(stderr, "[guest] steps=%ld  altstack steps=%ld  double deliveries=%ld\n", g_steps, g_steps_on_altstack,
+		g_double_deliveries);
+	fprintf(stderr, "[guest] signals: total=%ld  during upcall=%ld\n", g_sig_total, g_sig_in_upcall);
+	fprintf(stderr, "[guest] compute()=%a  reference=%a\n", got, want);
 
-    int fail = 0;
-    if (got != want) {
-        fprintf(stderr, "[guest] FAIL: stepped result != native reference\n");
-        fail = 1;
-    }
-    if (g_double_deliveries != 0) {
-        fprintf(stderr, "[guest] FAIL: %ld instruction(s) delivered twice\n",
-                g_double_deliveries);
-        fail = 1;
-    }
-    if (g_sig_total < 3) {
-        fprintf(stderr, "[guest] FAIL: only %ld signals -- test proved nothing\n",
-                g_sig_total);
-        fail = 1;
-    }
-    if (g_sig_in_upcall < 1) {
-        fprintf(stderr, "[guest] FAIL: no signal landed during an upcall -- "
-                "the parked-trap path was not exercised\n");
-        fail = 1;
-    }
+	int fail = 0;
+	if (got != want) {
+		fprintf(stderr, "[guest] FAIL: stepped result != native reference\n");
+		fail = 1;
+	}
+	if (g_double_deliveries != 0) {
+		fprintf(stderr, "[guest] FAIL: %ld instruction(s) delivered twice\n", g_double_deliveries);
+		fail = 1;
+	}
+	if (g_sig_total < 3) {
+		fprintf(stderr, "[guest] FAIL: only %ld signals -- test proved nothing\n", g_sig_total);
+		fail = 1;
+	}
+	if (g_sig_in_upcall < 1) {
+		fprintf(stderr,
+			"[guest] FAIL: no signal landed during an upcall -- the parked-trap path was not exercised\n");
+		fail = 1;
+	}
 
-    fprintf(stderr, "[guest] %s\n", fail ? "FAIL" : "PASS");
-    return fail;
+	fprintf(stderr, "[guest] %s\n", fail ? "FAIL" : "PASS");
+	return fail;
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 /*
  * pstepper: shared ABI between guest programs and the pstepper QEMU plugin.
  *
@@ -62,35 +63,35 @@
 #define PSTEPPER_SYSCALL_NR 0x50535445ULL
 
 enum pstepper_cmd {
-    /*
-     * arg1 = trampoline entry PC (pstepper_trampoline)
-     * arg2 = upcall stack top (guest vaddr): the high end of the upcall
-     *        stack, 64-byte aligned (the trampoline's xsave area alignment
-     *        derives from this -- see pstepper_frame.h). The trampoline is
-     *        entered with RSP = top - 16 and the trapped [RIP][RSP] pair
-     *        staged there. Only the top matters to the plugin -- it never
-     *        needs the base or the size (the guest side keeps those, for
-     *        munmap).
-     * arg3 = resuming: 0 for a normal arm from ordinary code; nonzero if the
-     *        calling thread is already running on the upcall stack and is
-     *        about to resume through a pre-built trampoline frame (only the
-     *        clone hook's bootstrap does this). When nonzero the plugin
-     *        starts the vCPU in its "trap parked" state, so the bootstrap
-     *        tail and first resume are not treated as steppable.
-     * arg4 = resume marker PC (pstepper_resume_marker, the `ud2` inside the
-     *        trampoline) -- the plugin recognizes execution reaching this
-     *        exact address as "pop [RSP]/[RSP+8] into RIP/RSP and resume",
-     *        rather than as a real illegal-instruction fault.
-     *
-     * Arms single-stepping for the calling thread. The upcall stack must be
-     * sized generously -- as with a POSIX sigaltstack, the entire handler
-     * call chain (trampoline, the user handler, anything it calls) runs on
-     * it.
-     */
-    PSTEPPER_CMD_ENABLE = 1,
+	/*
+	 * arg1 = trampoline entry PC (pstepper_trampoline)
+	 * arg2 = upcall stack top (guest vaddr): the high end of the upcall
+	 *        stack, 64-byte aligned (the trampoline's xsave area alignment
+	 *        derives from this -- see pstepper_frame.h). The trampoline is
+	 *        entered with RSP = top - 16 and the trapped [RIP][RSP] pair
+	 *        staged there. Only the top matters to the plugin -- it never
+	 *        needs the base or the size (the guest side keeps those, for
+	 *        munmap).
+	 * arg3 = resuming: 0 for a normal arm from ordinary code; nonzero if
+	 * the calling thread is already running on the upcall stack and is
+	 *        about to resume through a pre-built trampoline frame (only the
+	 *        clone hook's bootstrap does this). When nonzero the plugin
+	 *        starts the vCPU in its "trap parked" state, so the bootstrap
+	 *        tail and first resume are not treated as steppable.
+	 * arg4 = resume marker PC (pstepper_resume_marker, the `ud2` inside the
+	 *        trampoline) -- the plugin recognizes execution reaching this
+	 *        exact address as "pop [RSP]/[RSP+8] into RIP/RSP and resume",
+	 *        rather than as a real illegal-instruction fault.
+	 *
+	 * Arms single-stepping for the calling thread. The upcall stack must be
+	 * sized generously -- as with a POSIX sigaltstack, the entire handler
+	 * call chain (trampoline, the user handler, anything it calls) runs on
+	 * it.
+	 */
+	PSTEPPER_CMD_ENABLE = 1,
 
-    /* Disarms single-stepping for the calling thread. */
-    PSTEPPER_CMD_DISABLE = 3,
+	/* Disarms single-stepping for the calling thread. */
+	PSTEPPER_CMD_DISABLE = 3,
 };
 
 /* The (currently only) kind of UXI, handed to the handler in its first
@@ -102,9 +103,7 @@ enum pstepper_cmd {
 #define PSTEPPER_UXI_STEP 1
 
 // Makes PSTEPPER_SYSCALL_NR syscall
-uint64_t pstepper_syscall(uint64_t cmd, uint64_t arg1,
-			  uint64_t arg2, uint64_t arg3,
-			  uint64_t arg4);
+uint64_t pstepper_syscall(uint64_t cmd, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4);
 
 /*
  * General-purpose register snapshot handed to the pstepper handler. This is
@@ -125,10 +124,10 @@ uint64_t pstepper_syscall(uint64_t cmd, uint64_t arg1,
  * index mapping rather than a field-by-field shuffle.
  */
 typedef struct pstepper_gpregs {
-    uint64_t r8, r9, r10, r11, r12, r13, r14, r15;
-    uint64_t rdi, rsi, rbp, rbx, rdx, rax, rcx;
-    uint64_t rsp;
-    uint64_t rip;
+	uint64_t r8, r9, r10, r11, r12, r13, r14, r15;
+	uint64_t rdi, rsi, rbp, rbx, rdx, rax, rcx;
+	uint64_t rsp;
+	uint64_t rip;
 } pstepper_gpregs_t;
 
 /*
@@ -138,11 +137,11 @@ typedef struct pstepper_gpregs {
  * covered prefix. greg_t is `long long`, i.e. 8 bytes == our uint64_t.
  */
 _Static_assert(sizeof(uint64_t) == sizeof(greg_t), "greg_t is not 64-bit");
-#define PSTEPPER_ASSERT_GREG(field, reg) \
-    _Static_assert(offsetof(pstepper_gpregs_t, field) == (reg) * sizeof(greg_t), \
-                   "pstepper_gpregs_t." #field " does not match gregset_t[" #reg "]")
-PSTEPPER_ASSERT_GREG(r8,  REG_R8);
-PSTEPPER_ASSERT_GREG(r9,  REG_R9);
+#define PSTEPPER_ASSERT_GREG(field, reg)                                                                               \
+	_Static_assert(offsetof(pstepper_gpregs_t, field) == (reg) * sizeof(greg_t),                                   \
+		       "pstepper_gpregs_t." #field " does not match gregset_t[" #reg "]")
+PSTEPPER_ASSERT_GREG(r8, REG_R8);
+PSTEPPER_ASSERT_GREG(r9, REG_R9);
 PSTEPPER_ASSERT_GREG(r10, REG_R10);
 PSTEPPER_ASSERT_GREG(r11, REG_R11);
 PSTEPPER_ASSERT_GREG(r12, REG_R12);
@@ -162,7 +161,7 @@ PSTEPPER_ASSERT_GREG(rip, REG_RIP);
 /* rip is the last field, and every field from REG_R8=0 up to it is covered
  * with no gaps -- so the struct is exactly a prefix of gregset_t. */
 _Static_assert(sizeof(pstepper_gpregs_t) == (REG_RIP + 1) * sizeof(greg_t),
-               "pstepper_gpregs_t is not a gap-free prefix of gregset_t");
+	       "pstepper_gpregs_t is not a gap-free prefix of gregset_t");
 
 /*
  * The registered upcall handler. Deliberately shaped like a POSIX
@@ -184,8 +183,7 @@ _Static_assert(sizeof(pstepper_gpregs_t) == (REG_RIP + 1) * sizeof(greg_t),
  *                conversion is one-way: edits the handler makes to uc are
  *                NOT reflected back when the trapped instruction resumes.
  */
-typedef void (*pstepper_handler_fn)(int uxi_kind, void *info,
-                                     ucontext_t *uc);
+typedef void (*pstepper_handler_fn)(int uxi_kind, void *info, ucontext_t *uc);
 
 /* Defined in pstepper_trampoline.S. */
 extern void pstepper_trampoline(void);

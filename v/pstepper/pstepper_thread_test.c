@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 /*
  * Guest test program for pstepper's thread-creation and thread-exit hooks.
  * The main thread arms stepping, then spawns+joins a worker pthread many
@@ -21,10 +22,10 @@
  * itself. Before the "build the child a full frame" change the child resumed
  * with those registers clobbered by the bootstrap path.
  */
-#include <stdio.h>
-#include <string.h>
 #include <inttypes.h>
 #include <pthread.h>
+#include <stdio.h>
+#include <string.h>
 #include <sys/syscall.h>
 
 #include "pstepper.h"
@@ -53,36 +54,36 @@ static volatile int g_have_child_first_regs;
  * keep comparing plain `->rbx` fields. */
 static void gpregs_from_uc(pstepper_gpregs_t *out, const ucontext_t *uc)
 {
-    memcpy(out, uc->uc_mcontext.gregs, sizeof(*out));
+	memcpy(out, uc->uc_mcontext.gregs, sizeof(*out));
 }
 
 static void handler(int uxi_kind, void *info, ucontext_t *uc)
 {
-    const greg_t *g = uc->uc_mcontext.gregs;
-    /* No thread-id in the context (yet) -- distinguish threads via a
-     * thread-local flag computed once per thread instead. */
-    static __thread int is_child = -1;
-    if (is_child < 0) {
-        is_child = !pthread_equal(pthread_self(), g_main_tid_marker);
-    }
-    if (is_child) {
-        if (!g_have_child_first_regs) {
-            gpregs_from_uc(&g_child_first_regs, uc);
-            g_have_child_first_regs = 1; /* publish after the copy */
-        }
-        g_child_steps_seen++;
-    } else {
-        /* The stepped `clone` syscall itself -- we get a step upcall for it
-         * now, just before the intercept diverts. */
-        if (!g_have_parent_clone_regs && g[REG_RAX] == (greg_t)SYS_clone
-            && ((uint64_t)g[REG_RDI] & PST_CLONE_THREAD)) {
-            gpregs_from_uc(&g_parent_clone_regs, uc);
-            g_have_parent_clone_regs = 1;
-        }
-        g_main_steps_seen++;
-    }
-    (void)uxi_kind;
-    (void)info;
+	const greg_t *g = uc->uc_mcontext.gregs;
+	/* No thread-id in the context (yet) -- distinguish threads via a
+	 * thread-local flag computed once per thread instead. */
+	static __thread int is_child = -1;
+	if (is_child < 0) {
+		is_child = !pthread_equal(pthread_self(), g_main_tid_marker);
+	}
+	if (is_child) {
+		if (!g_have_child_first_regs) {
+			gpregs_from_uc(&g_child_first_regs, uc);
+			g_have_child_first_regs = 1; /* publish after the copy */
+		}
+		g_child_steps_seen++;
+	} else {
+		/* The stepped `clone` syscall itself -- we get a step upcall
+		 * for it now, just before the intercept diverts. */
+		if (!g_have_parent_clone_regs && g[REG_RAX] == (greg_t)SYS_clone &&
+		    ((uint64_t)g[REG_RDI] & PST_CLONE_THREAD)) {
+			gpregs_from_uc(&g_parent_clone_regs, uc);
+			g_have_parent_clone_regs = 1;
+		}
+		g_main_steps_seen++;
+	}
+	(void)uxi_kind;
+	(void)info;
 }
 
 /* Compare the registers a real clone would have carried parent->child. rax
@@ -90,47 +91,56 @@ static void handler(int uxi_kind, void *info, ucontext_t *uc)
  * everything else matches. Returns the number of mismatches, logging each. */
 static int check_clone_reg_fidelity(void)
 {
-    const pstepper_gpregs_t *p = &g_parent_clone_regs;
-    const pstepper_gpregs_t *c = &g_child_first_regs;
-    int bad = 0;
+	const pstepper_gpregs_t *p = &g_parent_clone_regs;
+	const pstepper_gpregs_t *c = &g_child_first_regs;
+	int bad = 0;
 
-#define CHECK(field)                                                          \
-    do {                                                                      \
-        if (p->field != c->field) {                                           \
-            fprintf(stderr, "[guest]   mismatch %-4s parent=0x%" PRIx64       \
-                    " child=0x%" PRIx64 "\n", #field, p->field, c->field);    \
-            bad++;                                                            \
-        }                                                                     \
-    } while (0)
+#define CHECK(field)                                                                                                   \
+	do {                                                                                                           \
+		if (p->field != c->field) {                                                                            \
+			fprintf(stderr, "[guest]   mismatch %-4s parent=0x%" PRIx64 " child=0x%" PRIx64 "\n", #field,  \
+				p->field, c->field);                                                                   \
+			bad++;                                                                                         \
+		}                                                                                                      \
+	} while (0)
 
-    CHECK(rbx); CHECK(rbp);
-    CHECK(r12); CHECK(r13); CHECK(r14); CHECK(r15);
-    CHECK(rdi); CHECK(rsi); CHECK(rdx); CHECK(r8); CHECK(r9); CHECK(r10);
-    CHECK(rcx); CHECK(r11);
+	CHECK(rbx);
+	CHECK(rbp);
+	CHECK(r12);
+	CHECK(r13);
+	CHECK(r14);
+	CHECK(r15);
+	CHECK(rdi);
+	CHECK(rsi);
+	CHECK(rdx);
+	CHECK(r8);
+	CHECK(r9);
+	CHECK(r10);
+	CHECK(rcx);
+	CHECK(r11);
 #undef CHECK
 
-    if (c->rax != 0) {
-        fprintf(stderr, "[guest]   child rax = 0x%" PRIx64 ", expected 0\n",
-                c->rax);
-        bad++;
-    }
-    return bad;
+	if (c->rax != 0) {
+		fprintf(stderr, "[guest]   child rax = 0x%" PRIx64 ", expected 0\n", c->rax);
+		bad++;
+	}
+	return bad;
 }
 
 __attribute__((noinline)) static double compute(int n)
 {
-    double acc = 1.0;
-    for (int i = 1; i <= n; i++) {
-        acc = acc * 1.0001 + (double)i;
-    }
-    return acc;
+	double acc = 1.0;
+	for (int i = 1; i <= n; i++) {
+		acc = acc * 1.0001 + (double)i;
+	}
+	return acc;
 }
 
 static void *thread_fn(void *arg)
 {
-    (void)arg;
-    g_child_result = compute(1000);
-    return NULL;
+	(void)arg;
+	g_child_result = compute(1000);
+	return NULL;
 }
 
 /* This process's virtual address-space size, in KiB (VmSize from
@@ -138,93 +148,97 @@ static void *thread_fn(void *arg)
  * ~64 KiB an iteration. */
 static long vm_size_kb(void)
 {
-    FILE *f = fopen("/proc/self/status", "r");
-    if (!f) {
-        perror("[guest] fopen(/proc/self/status)");
-        return -1;
-    }
-    char key[64];
-    long kb = -1;
-    while (fscanf(f, "%63s", key) == 1) {
-        if (strcmp(key, "VmSize:") == 0) {
-            if (fscanf(f, "%ld", &kb) != 1) {
-                kb = -1;
-            }
-            break;
-        }
-    }
-    fclose(f);
-    return kb;
+	FILE *f = fopen("/proc/self/status", "r");
+	if (!f) {
+		perror("[guest] fopen(/proc/self/status)");
+		return -1;
+	}
+	char key[64];
+	long kb = -1;
+	while (fscanf(f, "%63s", key) == 1) {
+		if (strcmp(key, "VmSize:") == 0) {
+			if (fscanf(f, "%ld", &kb) != 1) {
+				kb = -1;
+			}
+			break;
+		}
+	}
+	fclose(f);
+	return kb;
 }
 
 int main(void)
 {
-    g_main_tid_marker = pthread_self();
+	g_main_tid_marker = pthread_self();
 
-    fprintf(stderr, "[guest] arming pstepper\n");
-    pstepper_enable(handler, 65536);
+	fprintf(stderr, "[guest] arming pstepper\n");
+	pstepper_enable(handler, 65536);
 
-    long vm_after_first = -1;
-    double first_result = 0.0;
+	long vm_after_first = -1;
+	double first_result = 0.0;
 
-    for (int it = 0; it < ITERATIONS; it++) {
-        pthread_t tid;
-        int rc = pthread_create(&tid, NULL, thread_fn, NULL);
-        if (rc != 0) {
-            fprintf(stderr, "[guest] pthread_create failed at iter %d, "
-                    "rc=%d (%s)\n", it, rc, strerror(rc));
-            return 1;
-        }
-        pthread_join(tid, NULL);
+	for (int it = 0; it < ITERATIONS; it++) {
+		pthread_t tid;
+		int rc = pthread_create(&tid, NULL, thread_fn, NULL);
+		if (rc != 0) {
+			fprintf(stderr,
+				"[guest] pthread_create failed at iter %d, "
+				"rc=%d (%s)\n",
+				it, rc, strerror(rc));
+			return 1;
+		}
+		pthread_join(tid, NULL);
 
-        if (it == 0) {
-            first_result = g_child_result;
-            /* Baseline after iter 0, once glibc's thread-stack cache has
-             * warmed -- otherwise the first worker's own stack shows up as
-             * growth. */
-            vm_after_first = vm_size_kb();
-        } else if (g_child_result != first_result) {
-            fprintf(stderr, "[guest] FAIL: iter %d child result %f != %f\n",
-                    it, g_child_result, first_result);
-            return 1;
-        }
-    }
+		if (it == 0) {
+			first_result = g_child_result;
+			/* Baseline after iter 0, once glibc's thread-stack
+			 * cache has warmed -- otherwise the first worker's own
+			 * stack shows up as growth. */
+			vm_after_first = vm_size_kb();
+		} else if (g_child_result != first_result) {
+			fprintf(stderr, "[guest] FAIL: iter %d child result %f != %f\n", it, g_child_result,
+				first_result);
+			return 1;
+		}
+	}
 
-    long vm_at_end = vm_size_kb();
-    long vm_delta = vm_at_end - vm_after_first;
+	long vm_at_end = vm_size_kb();
+	long vm_delta = vm_at_end - vm_after_first;
 
-    pstepper_disable();
+	pstepper_disable();
 
-    fprintf(stderr, "[guest] disabled pstepper after %d iterations\n",
-            ITERATIONS);
-    fprintf(stderr, "[guest] main steps = %ld, child steps (summed) = %ld, "
-            "child result = %f\n", g_main_steps_seen, g_child_steps_seen,
-            first_result);
-    fprintf(stderr, "[guest] VmSize after iter 0 = %ld kB, at end = %ld kB "
-            "(delta %ld kB)\n", vm_after_first, vm_at_end, vm_delta);
+	fprintf(stderr, "[guest] disabled pstepper after %d iterations\n", ITERATIONS);
+	fprintf(stderr,
+		"[guest] main steps = %ld, child steps (summed) = %ld, "
+		"child result = %f\n",
+		g_main_steps_seen, g_child_steps_seen, first_result);
+	fprintf(stderr,
+		"[guest] VmSize after iter 0 = %ld kB, at end = %ld kB "
+		"(delta %ld kB)\n",
+		vm_after_first, vm_at_end, vm_delta);
 
-    if (!g_have_parent_clone_regs || !g_have_child_first_regs) {
-        fprintf(stderr, "[guest] FAIL: never captured %s regs\n",
-                !g_have_parent_clone_regs ? "parent clone" : "child first");
-        return 1;
-    }
-    int bad = check_clone_reg_fidelity();
-    fprintf(stderr, "[guest] clone-child register fidelity: %s (%d mismatch)\n",
-            bad ? "BAD" : "ok", bad);
-    if (bad) {
-        return 1;
-    }
+	if (!g_have_parent_clone_regs || !g_have_child_first_regs) {
+		fprintf(stderr, "[guest] FAIL: never captured %s regs\n",
+			!g_have_parent_clone_regs ? "parent clone" : "child first");
+		return 1;
+	}
+	int bad = check_clone_reg_fidelity();
+	fprintf(stderr, "[guest] clone-child register fidelity: %s (%d mismatch)\n", bad ? "BAD" : "ok", bad);
+	if (bad) {
+		return 1;
+	}
 
-    /* Threshold well above thread-stack-cache / allocator jitter (~100 kB
-     * observed) and well below a real leak (ITERATIONS-1 further workers *
-     * 64 kB ~= 2.5 MB). */
-    if (vm_delta > 512) {
-        fprintf(stderr, "[guest] FAIL: VmSize grew %ld kB across %d further "
-                "iterations -- upcall stacks are leaking\n", vm_delta,
-                ITERATIONS - 1);
-        return 1;
-    }
+	/* Threshold well above thread-stack-cache / allocator jitter (~100 kB
+	 * observed) and well below a real leak (ITERATIONS-1 further workers *
+	 * 64 kB ~= 2.5 MB). */
+	if (vm_delta > 512) {
+		fprintf(stderr,
+			"[guest] FAIL: VmSize grew %ld kB across %d further "
+			"iterations -- upcall stacks are leaking\n",
+			vm_delta, ITERATIONS - 1);
+		return 1;
+	}
 
-    fprintf(stderr, "[guest] PASS\n");
-    return 0;
+	fprintf(stderr, "[guest] PASS\n");
+	return 0;
 }

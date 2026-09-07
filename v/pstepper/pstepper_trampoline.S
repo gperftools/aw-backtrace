@@ -1,4 +1,6 @@
 /*
+ * SPDX-License-Identifier: 0BSD
+ *
  * pstepper_trampoline: what the plugin jumps PC to on every trap -- the
  * start of a UXI upcall. Entry state, arranged by the plugin: RSP =
  * upcall_stack_top - 16, with [RSP] = trapped RIP and [RSP+8] = trapped RSP

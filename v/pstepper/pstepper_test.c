@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 /*
  * Guest test program for pstepper. Written purely against pstepper.h --
  * no knowledge of QEMU. Arms stepping, runs a chunk of real floating-point
@@ -5,8 +6,8 @@
  * delivery and that FP/SIMD state survives transparently across every
  * trap/resume), then disables stepping and exits normally.
  */
-#include <stdio.h>
 #include <inttypes.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "pstepper.h"
@@ -16,38 +17,39 @@ static volatile double g_fp_seen; /* proves xmm/fp state survives round-trip */
 
 static void handler(int uxi_kind, void *info, ucontext_t *uc)
 {
-    const greg_t *g = uc->uc_mcontext.gregs;
-    g_steps_seen++;
-    if (g_steps_seen <= 5 || (g_steps_seen % 5000) == 0) {
-        fprintf(stderr, "[guest handler] step %ld: rip=0x%llx rsp=0x%llx\n",
-                g_steps_seen, (unsigned long long)g[REG_RIP],
-                (unsigned long long)g[REG_RSP]);
-    }
+	const greg_t *g = uc->uc_mcontext.gregs;
+	g_steps_seen++;
+	if (g_steps_seen <= 5 || (g_steps_seen % 5000) == 0) {
+		fprintf(stderr, "[guest handler] step %ld: rip=0x%llx rsp=0x%llx\n", g_steps_seen,
+			(unsigned long long)g[REG_RIP], (unsigned long long)g[REG_RSP]);
+	}
 }
 
 /* A little floating point work, to exercise xmm state round-tripping
  * through every single-stepped instruction. */
 __attribute__((noinline)) static double compute(int n)
 {
-    double acc = 1.0;
-    for (int i = 1; i <= n; i++) {
-        acc = acc * 1.0001 + (double)i;
-    }
-    return acc;
+	double acc = 1.0;
+	for (int i = 1; i <= n; i++) {
+		acc = acc * 1.0001 + (double)i;
+	}
+	return acc;
 }
 
 int main(void)
 {
-    fprintf(stderr, "[guest] arming pstepper\n");
-    int enable_err = pstepper_enable(handler, 65536);
-    if (enable_err != 0) {
-	fprintf(stderr, "Warning: got pstepper syscall failure: %s\n", strerror(enable_err));
-    }
+	fprintf(stderr, "[guest] arming pstepper\n");
+	int enable_err = pstepper_enable(handler, 65536);
+	if (enable_err != 0) {
+		fprintf(stderr, "Warning: got pstepper syscall failure: %s\n", strerror(enable_err));
+	}
 
-    g_fp_seen = compute(20000);
+	g_fp_seen = compute(20000);
 
-    pstepper_disable();
-    fprintf(stderr, "[guest] disabled pstepper, steps seen = %ld, "
-            "compute() = %f\n", g_steps_seen, g_fp_seen);
-    return 0;
+	pstepper_disable();
+	fprintf(stderr,
+		"[guest] disabled pstepper, steps seen = %ld, "
+		"compute() = %f\n",
+		g_steps_seen, g_fp_seen);
+	return 0;
 }
