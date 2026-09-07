@@ -244,6 +244,25 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "arm64-leaf-test",
+    srcs = [
+        "arm64-leaf-test.cc",
+    ],
+    cxxopts = CXXOPTS,
+    features = ["-supports_start_end_lib"],
+    linkstatic = True,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+    deps = [
+        ":aw-backtrace",
+        ":headers",
+        ":symbolize-backtrace",
+    ],
+)
+
 cc_binary(
     name = "recursion-test",
     srcs = ["recursion-test.cc"],

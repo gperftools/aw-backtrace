@@ -25,8 +25,8 @@ The contract:
 * Anything outside that model is an explicit, reported error, never a silent
   guess.
 * Modern Linux, glibc 2.35+ (`_dl_find_object`). x86-64 is where the testing
-  is; aarch64 builds and passes the basic tests but has no comparer and no
-  `GuessUnwindInfo`. riscv and 32-bit eventually.
+  is; aarch64 builds, passes the basic tests and has its own `GuessUnwindInfo`
+  (§4.9), but no comparer and no fast path. riscv and 32-bit eventually.
 
 ## 2. Build and test
 
@@ -37,19 +37,10 @@ The contract:
 bzlmod, one top-level package, module `aw-backtrace`.
 
 ```
-bazel test ...:all               # the normal loop: 15 tests
+bazel test ...:all
 bazel test -c opt ...:all        # NDEBUG: drops assert(), keeps CHECK()
 ./test-all-cfg.rb                # gcc/clang x dbg/opt sweep, all four green
 ```
-
-Fifteen tests under `...:all`: ten in the top package, `//perf-convert`'s
-two, and `//v/mini-x86-int`'s three. Bare `:all` runs only the ten
-top-package tests — the rest need the `...`.
-
-`v/mini-x86-int` is an ordinary package in this module now (folded in from
-what was briefly its own `local_path_override`'d module, never published).
-Its targets are `target_compatible_with` linux/x86-64, so its three tests
-just skip on other platforms; on x86-64 they ride in the `...:all` loop.
 
 Traps worth knowing before you fight the build:
 
@@ -174,6 +165,14 @@ Cache counters only exist when `AW_BUMP_STATS_IN_PRODUCTION` is defined —
   for leaf/epilogue issues, and the gdb-friendly binary (no comparer).
   Also holds the jump-through-null test (§4.1): `call *%rax` with `%rax == 0`,
   caught by a SIGSEGV handler that captures and `siglongjmp`s out.
+* `arm64-leaf-test.cc` — the aarch64 companion, and the only test of §4.9. Its
+  fixtures are asm *without* `.cfi_startproc`, so no FDE is emitted and every
+  step out of them comes from the guess; glibc `backtrace()` is printed but
+  cannot be the reference, since it gives up on exactly these frames. Pins the
+  stale-x30 self-correction and the jump-through-null case (`blr` on a zeroed
+  register), and documents the one shape the guess gets wrong. Also never
+  starts the comparer, so it is the gdb-friendly binary on aarch64. Note the
+  `paciasp` fixture is inert without FEAT_PAuth.
 * `aw-backtrace-skip-test.cc` — the `skip` argument of `aw_backtrace`: skipping
   N frames must equal a full capture with N dropped, and the returned count is
   what was actually filled.
@@ -251,12 +250,14 @@ rather than the one being unwound *from*.
 **A zero pc means two different things, and `is_leaf` is what tells them
 apart.** From an unwind step it is the end of the chain — the outermost frame's
 return-address slot is zeroed — and the walk stops. From a register file it is a
-live jump through a null function pointer: the pc really is 0, the `call` pushed
-its return address before faulting on the fetch at 0, so `sp` points straight at
-it and `Arch::GuessUnwindInfo` recovers the caller. Both loops therefore break
-only on `pc == 0 && !is_leaf`, which is also what keeps `lookup_pc`'s `- 1` from
-underflowing. Regression test in `amd64-leaf-test.cc`; libgcc and libunwind both
-give up here, so there is no reference implementation to diff against.
+live jump through a null function pointer: the pc really is 0 and the caller is
+still recoverable, because the branch recorded its return address before faulting
+on the fetch at 0 — on x86-64 `call` pushed it, so `sp` points straight at it; on
+aarch64 `blr` wrote x30. Either way `Arch::GuessUnwindInfo` finds it. Both loops
+therefore break only on `pc == 0 && !is_leaf`, which is also what keeps
+`lookup_pc`'s `- 1` from underflowing. Regression tests in `amd64-leaf-test.cc`
+and `arm64-leaf-test.cc`; libgcc and libunwind both give up here, so there is no
+reference implementation to diff against.
 
 When the lookup produces nothing, a **fallback chain** runs in this order: PLT
 detection (leaf only) → signal-trampoline byte match → DRAP (x86-64, and only
@@ -482,6 +483,62 @@ it even consults the shadow stack — so a fast-path or cache bug is a test
 failure with `--fast:` / `--ref:` dumps, independent of the shadow-stack
 machinery.
 
+### 4.9 The aarch64 guess
+
+`Arch::GuessUnwindInfo` is per-arch for a structural reason: **`bl` puts the
+return address in x30, not on the stack**, so x86-64's central heuristic — "the
+word at `*sp` looks like a pc, because `call` pushed it" — has no aarch64
+counterpart and must not be ported. At the entry to a callee `*sp` still belongs
+to the caller, and very often holds the caller's own spilled x30, so that guess
+would silently report the *grandparent*. Two shapes are left:
+
+* **x30 is live** — a leaf that never spilled it, the window before a prologue's
+  `stp` and after an epilogue's `ldp`, PLT stubs, `blr` through null. Then
+  CFA == sp and the answer is exactly `ResetFrameInfo`. Needs a register file,
+  so leaf frames only. The register goes through `CleanReturnAddress` before
+  anything looks at it, since FEAT_PAuth leaves a signed pointer there.
+* **the AAPCS64 frame record at fp**, `{caller's x29, return address}`.
+
+x86-64's third guess, the mid-prologue one, has no aarch64 analogue worth
+writing: on a leaf we always have the register file, so x30 answers that window
+with an exact CFA, and a non-leaf pc — being a return address — can never land
+inside a prologue.
+
+**x30 first, and the ordering is a damage argument, not a confidence one.**
+Nothing distinguishes the two cases locally. x30 is only ever written by a call,
+so a *stale* x30 still points just past a `bl` and looks exactly as valid as a
+live one; and in the first case fp is the *caller's* record, which validates
+just as well as our own would. But the mistakes are not symmetric. Preferring
+x30 wrongly costs one spurious frame pointing back into the same function, and
+only one — the next step is no longer a leaf, so it cannot consult x30 and walks
+the same still-valid fp to the real caller. Preferring the record wrongly
+deletes a caller permanently. Repeating a callee beats deleting a caller;
+`arm64-leaf-test.cc` pins both halves.
+
+**The frame-record walk takes the CFA from the caller's side.** The record sits
+at the *bottom* of the frame in both gcc's and clang's layouts, so `fp + 16` is
+only a lower bound on the CFA — the frame size, unknowable without unwind info,
+is the gap. `*(fp)` is the caller's x29 instead, and gcc keeps `x29 == sp`
+through the body of any function with a static frame, which is exactly when it
+also leaves the CFA sp-based (~99% of FDE rows in gcc-built libraries are
+`sp+N`; gcc switches to `x29+N` only where sp goes dynamic, and clang switches
+always). So the rule is `cfa = DerefFpRel(0)`, `fp = MemFpRel(0)`,
+`ra = MemFpRel(8)` — the same identity `InitializeUnwindForCaller` already
+relies on. `RegisterRule::MemFpRel` for RA exists only for this; nothing in the
+CFI decoder emits it. The shape is not representable in `CompressedFrameInfo`,
+which is harmless since guesses are never cached, but it does mean guess results
+cannot be made cacheable without widening it.
+
+**It never reads code.** No prologue scanning, no "was the previous instruction
+a `bl`" test on candidate pcs — deliberately, so the guess cannot fault on
+execute-only text (FEAT_EPAN, `HWCAP2_EXECONLY`) and does not depend on
+instruction patterns. A candidate pc must be nonzero, 4-aligned and in an
+executable VMA; that is the whole check. The price is the case
+`arm64-leaf-test.cc` documents rather than fixes: a CFI-less leaf that carves
+scratch space off sp keeps x30 live, so the caller's pc comes back right, but
+CFA == sp is then wrong by the size of that area and everything below the
+recovered frame is garbage.
+
 ## 5. Conventions and gotchas
 
 * C++20, 2-space indent, 120 cols, Google-ish (`.clang-format`). Emacs mode
@@ -503,7 +560,7 @@ machinery.
   archaeology to do. Infer intent from `TODO`, `README.md` and this file.
 * **Debugging.** `aw-backtrace-test` and `lua-test` start the single-stepping
   comparer, which fights gdb. Use `aw-backtrace-test --nocompare`,
-  `amd64-leaf-test` (never starts it), or `cjm0`. `AW_BT_BREAK_AT=0x<addr>` (or
+  `amd64-leaf-test` / `arm64-leaf-test` (never start it), or `cjm0`. `AW_BT_BREAK_AT=0x<addr>` (or
   `0x<addr>:<skips>`) stops the stepper there, prints the pid and `SIGSTOP`s so
   you can attach; `kill -CONT` resumes.
 * **Comparer mismatch knobs**, both read once at start: `AW_BT_DIAG=N` means
@@ -551,10 +608,19 @@ bitfield (benign; `tag` is already masked, gcc can't see it) and two
 True of the tree but not in `TODO`:
 
 * **aarch64 builds and passes the basic tests, but is not release-ready** — no
-  `GuessUnwindInfo`, no comparer (the sim-stepper is x86-only), no CI. The
-  biggest coverage hole. It is also easy to break without noticing, since
-  nothing in the default build compiles it; `aarch64-linux-gnu-g++ -c` on the
-  core sources is a cheap smoke test.
+  comparer (the sim-stepper is x86-only, and `PSTATE.SS` is EL1-only, so the
+  self-stepping trick cannot be ported; a comparer here needs `ptrace` or an
+  instrumentation-based shadow stack), no fast path (§4.8 dead-codes out), no
+  CI. `GuessUnwindInfo` now exists (§4.9), with `arm64-leaf-test.cc` behind it,
+  but its accuracy is unmeasured — see the differ below. Still easy to break
+  without noticing from an x86 box, since nothing in the default build compiles
+  it; `aarch64-linux-gnu-g++ -c` on the core sources is a cheap smoke test.
+* **No guess-vs-CFI differ.** The cheapest oracle available for §4.9, and it
+  works on either arch: for every frame where `DoUnwindLookup` succeeded, also
+  run `GuessUnwindInfo` and diff the resulting cursor step. That measures the
+  false-positive rate and the CFA error over any workload, needs no stepping
+  machinery at all, and is what should decide whether the residual cases in
+  §4.9 are worth more code.
 * **The comparer's own machinery is the fastest-moving code in the tree and
   almost none of it is under test.** `BacktraceBuffer`, the truncation rule, the
   SIGTRAP resynchronization and the two libc interposers are validated only by

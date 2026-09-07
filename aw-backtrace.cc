@@ -590,6 +590,15 @@ void UnwindLoop(Cursor cursor, const ucontext_t* in_uc, aw_backtrace_callback ca
           new_ip = 0;
         }
         break;
+      // Only guesses produce this: an fp-relative RA lets a frame-record walk
+      // read the return address without first committing to a CFA it cannot
+      // know (see aarch64's GuessFrameRecord). Failure is handled the same way
+      // as above -- a zero pc stops the walk at the top of the next iteration.
+      case RegisterRule::Kind::MemFpRel:
+        if (!acc.TryReadPtr(AddOffset(cursor.fp, info.ra.offset), &new_ip)) {
+          new_ip = 0;
+        }
+        break;
       default:
         return;
     }

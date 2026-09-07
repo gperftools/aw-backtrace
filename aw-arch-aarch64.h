@@ -133,13 +133,113 @@ struct Arch {
     return false;
   }
 
+ private:
+  template <typename AddrChecker>
+  static bool CheckPossiblePC(AddrChecker* checker, uintptr_t maybe_pc) {
+    // Every aarch64 instruction is 4-byte aligned, so this is free precision
+    // the x86-64 side cannot have.
+    if (maybe_pc == 0 || (maybe_pc & 3) != 0) {
+      return false;
+    }
+    // pc_vma is really std::optional<aw_addrcheck_entry>, but we avoid the
+    // include here. The real AddrChecker wrapper is in the .cc anyways.
+    auto pc_vma = checker->Lookup(maybe_pc);
+    // Executable is all we require: execute-only text (FEAT_EPAN) is a
+    // perfectly valid place for a return address to point.
+    return (pc_vma && pc_vma->perm_exec);
+  }
+
+  // H2: walk the AAPCS64 frame record at fp, {caller's x29, return address}.
+  //
+  // The CFA -- the caller's sp -- is not recoverable from this side: the
+  // record sits at the *bottom* of the frame in both gcc's and clang's
+  // layouts, so the frame size, which we cannot know without unwind info,
+  // separates fp from the CFA. It is recoverable from the other side.
+  // *(fp) is the caller's x29, and gcc keeps x29 == sp through the whole body
+  // of any function with a static frame -- which is exactly the case where it
+  // also leaves the CFA sp-based. Once sp becomes dynamic gcc switches the CFA
+  // to x29-relative and the value we supply goes unused (clang switches
+  // always). So `cfa = *(fp)` is right in both branches, and it is the same
+  // identity InitializeUnwindForCaller already relies on.
+  template <typename AddrChecker>
+  static bool GuessFrameRecord(Cursor cursor, AddrChecker* checker, FrameInfo* info) {
+    static constexpr uintptr_t kMaxHeuristicsFrameSize = 32 << 10;
+
+    uintptr_t fp = cursor.fp;
+    // sp is always 16-aligned on aarch64, and x29 is set from it.
+    if ((fp & 15) != 0 || fp < cursor.sp || fp - cursor.sp > kMaxHeuristicsFrameSize) {
+      return false;
+    }
+
+    auto stack_vma = checker->Lookup(fp);
+    if (!stack_vma || !stack_vma->perm_read || !stack_vma->perm_write) {
+      return false;
+    }
+    if (fp + 16 < fp || fp + 16 > stack_vma->end) {
+      return false;
+    }
+
+    const uintptr_t* record = reinterpret_cast<const uintptr_t*>(fp);
+    uintptr_t saved_fp = record[0];
+    uintptr_t saved_lr = CleanReturnAddress(record[1]);
+
+    if (!CheckPossiblePC(checker, saved_lr)) {
+      return false;
+    }
+    // Either the chain terminator libc plants in the outermost frame, or a
+    // record strictly further up the stack. The +16 is the far end of the
+    // bracket the CFA lives in: a caller's x29 below fp + 16 cannot be real.
+    if (saved_fp != 0 && (saved_fp < fp + 16 || (saved_fp & 15) != 0)) {
+      return false;
+    }
+
+    info->cfa = CfaRule::DerefFpRel(0);    // caller's sp  == caller's x29 == *(fp)
+    info->fp = RegisterRule::MemFpRel(0);  // caller's x29 == *(fp)
+    info->ra = RegisterRule::MemFpRel(8);  // caller's pc  == *(fp + 8)
+    return true;
+  }
+
+ public:
+  // Recovering a frame with no unwind info at all. Unlike x86-64, `bl` puts
+  // the return address in x30 rather than on the stack, so there is nothing
+  // like "the word at *sp looks like a return address" to lean on -- at the
+  // entry to a callee, *sp still belongs to the caller. That leaves exactly
+  // two shapes:
+  //
+  //   H1: x30 is live. True of a leaf that never spilled it, of the window
+  //       before a prologue's stp and after an epilogue's ldp, of PLT stubs,
+  //       and of a `blr` through null. CFA == sp, because such code has not
+  //       moved sp either. Only usable on a frame we have a register file for.
+  //
+  //   H2: the AAPCS64 frame record at fp, {caller's x29, return address}.
+  //
+  // H1 goes first: the dominant no-CFI shape is a leaf helper that sets up
+  // nothing, where fp still describes the *caller* and H2 would silently drop
+  // a frame. When x30 is stale instead (the function did call something and we
+  // caught it mid-body), H1 costs one spurious frame pointing back into the
+  // same function -- and only one, because the next step is no longer a leaf,
+  // so H2 runs off the same still-valid fp and recovers the real caller.
+  // Deleting a caller is worse than repeating a callee, so that is the trade.
+  //
+  // Note there is no equivalent of x86-64's mid-prologue guess. On a leaf we
+  // always have the register file, so x30 answers that window correctly and
+  // with an exact CFA; and a non-leaf pc, being a return address, can never
+  // land inside a prologue.
   template <typename AddrChecker>
   static bool GuessUnwindInfo(Cursor cursor, const ucontext_t* uc_if_leaf, AddrChecker* checker, FrameInfo* info) {
-    (void)cursor;
-    (void)uc_if_leaf;
-    (void)info;
-    (void)checker;
-    return false;
+    if (uc_if_leaf != nullptr) {
+      // CleanReturnAddress first: with FEAT_PAuth the register holds a signed
+      // pointer, which would fail the checks below on its tag bits alone.
+      uintptr_t lr = CleanReturnAddress(uc_if_leaf->uc_mcontext.regs[30]);
+      if (CheckPossiblePC(checker, lr)) {
+        // Exactly the architectural default: CFA = sp, RA in x30, fp
+        // unchanged.
+        ResetFrameInfo(info);
+        return true;
+      }
+    }
+
+    return GuessFrameRecord(cursor, checker, info);
   }
 
   static void ResetFrameInfo(FrameInfo* info) {
