@@ -7,7 +7,9 @@
  * pstepper_trampoline.S for the hand-written asm this dispatches into/out
  * of.
  */
+
 #include <cpuid.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -66,6 +68,13 @@ static void pstepper_die(const char *msg)
 {
     fprintf(stderr, "pstepper: %s\n", msg);
     abort();
+}
+
+uint64_t pstepper_syscall(uint64_t cmd, uint64_t arg1,
+			  uint64_t arg2, uint64_t arg3,
+			  uint64_t arg4)
+{
+    return syscall(PSTEPPER_SYSCALL_NR, cmd, arg1, arg2, arg3, arg4);
 }
 
 /* Compute pstepper_xsave_mask from the live XCR0. Runs in the guest, so the
@@ -203,12 +212,12 @@ static void *pstepper_alloc_upcall_stack(uint64_t size)
  * clone-bootstrapped thread arming while already on its upcall stack and
  * about to resume through a pre-built frame (pstepper_child_bootstrap()) --
  * see PSTEPPER_CMD_ENABLE in pstepper.h. */
-static void pstepper_arm_stepping(uint64_t upcall_top, int resuming)
+static int pstepper_arm_stepping(uint64_t upcall_top, int resuming)
 {
-    pstepper_syscall(PSTEPPER_CMD_ENABLE,
-                      (uint64_t)(uintptr_t)pstepper_trampoline, upcall_top,
-                      (uint64_t)resuming,
-                      (uint64_t)(uintptr_t)pstepper_resume_marker);
+    return pstepper_syscall(PSTEPPER_CMD_ENABLE,
+			    (uint64_t)(uintptr_t)pstepper_trampoline, upcall_top,
+			    (uint64_t)resuming,
+			    (uint64_t)(uintptr_t)pstepper_resume_marker);
 }
 
 /*
@@ -383,11 +392,13 @@ void pstepper_child_bootstrap(uint64_t upcall_stack_base,
                                uint64_t child_frame_base)
 {
     pstepper_own_upcall_stack = (void *)(uintptr_t)upcall_stack_base;
-    pstepper_arm_stepping(pstepper_upcall_top(upcall_stack_base), 1);
+    if (pstepper_arm_stepping(pstepper_upcall_top(upcall_stack_base), 1) < 0) {
+	pstepper_die("failed to arm the stepping in the child");
+    }
     pstepper_resume_via_frame(child_frame_base); /* noreturn */
 }
 
-void pstepper_enable(pstepper_handler_fn handler, uint64_t upcall_stack_size)
+int pstepper_enable(pstepper_handler_fn handler, uint64_t upcall_stack_size)
 {
     pstepper_user_handler = handler;
     pstepper_upcall_stack_size = upcall_stack_size;
@@ -404,12 +415,22 @@ void pstepper_enable(pstepper_handler_fn handler, uint64_t upcall_stack_size)
     pstepper_own_upcall_stack =
         pstepper_alloc_upcall_stack(pstepper_upcall_stack_size);
     uint64_t base = (uint64_t)(uintptr_t)pstepper_own_upcall_stack;
-    pstepper_arm_stepping(pstepper_upcall_top(base), 0);
+
+    int ret = 0;
+    if (pstepper_arm_stepping(pstepper_upcall_top(base), 0) < 0) {
+	ret = errno;
+	// silently assuming ENOSYS
+        munmap(pstepper_own_upcall_stack, pstepper_upcall_stack_size);
+        pstepper_own_upcall_stack = NULL;
+    }
+    return ret;
 }
 
 void pstepper_disable(void)
 {
-    pstepper_syscall(PSTEPPER_CMD_DISABLE, 0, 0, 0, 0);
+    if (pstepper_syscall(PSTEPPER_CMD_DISABLE, 0, 0, 0, 0) < 0) {
+	pstepper_die("PSTEPPER_CMD_DISABLE failed");
+    }
     if (pstepper_own_upcall_stack) {
         munmap(pstepper_own_upcall_stack, pstepper_upcall_stack_size);
         pstepper_own_upcall_stack = NULL;

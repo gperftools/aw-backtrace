@@ -48,15 +48,9 @@
 
 #include <stddef.h>
 #include <stdint.h>
-
-/*
- * For gregset_t's REG_* indices, which the _Static_assert block below pins
- * pstepper_gpregs_t's field order to. This is glibc's x86-64
- * <ucontext.h>: the REG_* enum lives behind __USE_GNU, so every
- * translation unit that includes this header must be built with
- * -D_GNU_SOURCE (the pstepper build sets it in GUEST_CFLAGS / PLUGIN_CFLAGS).
- */
+#include <sys/syscall.h>
 #include <ucontext.h>
+#include <unistd.h>
 
 /*
  * ASCII "PSTE" -- comfortably outside the real x86-64 syscall table (which
@@ -107,26 +101,10 @@ enum pstepper_cmd {
  * ucontext_t (see pstepper_handler_fn below). */
 #define PSTEPPER_UXI_STEP 1
 
-/*
- * Raw syscall, args in rdi/rsi/rdx/r10/r8 order -- i.e. cmd lands in the
- * filter callback's a1, arg1 in a2, arg2 in a3, arg3 in a4, arg4 in a5. See
- * qemu_plugin_vcpu_syscall_filter_cb_t: num is the syscall number (rax),
- * a1 is rdi, a2 is rsi, a3 is rdx, a4 is r10, a5 is r8.
- */
-static inline uint64_t pstepper_syscall(uint64_t cmd, uint64_t arg1,
-                                         uint64_t arg2, uint64_t arg3,
-                                         uint64_t arg4)
-{
-    uint64_t ret;
-    register uint64_t r10 __asm__("r10") = arg3;
-    register uint64_t r8 __asm__("r8") = arg4;
-    __asm__ volatile("syscall"
-                      : "=a"(ret)
-                      : "a"(PSTEPPER_SYSCALL_NR), "D"(cmd), "S"(arg1),
-                        "d"(arg2), "r"(r10), "r"(r8)
-                      : "rcx", "r11", "memory");
-    return ret;
-}
+// Makes PSTEPPER_SYSCALL_NR syscall
+uint64_t pstepper_syscall(uint64_t cmd, uint64_t arg1,
+			  uint64_t arg2, uint64_t arg3,
+			  uint64_t arg4);
 
 /*
  * General-purpose register snapshot handed to the pstepper handler. This is
@@ -224,12 +202,13 @@ extern void pstepper_resume_marker(void);
 void pstepper_invoke_handler(pstepper_gpregs_t *regs);
 
 /*
- * Defined in pstepper.c. pstepper_enable() mmaps its own upcall stack of
- * upcall_stack_size bytes (remembered process-wide for the thread-creation
- * hook to reuse when bootstrapping later threads) and frees it again in
- * pstepper_disable().
+ * Defined in pstepper.c. pstepper_enable() mmaps its own upcall stack
+ * of upcall_stack_size bytes (remembered process-wide for the
+ * thread-creation hook to reuse when bootstrapping later threads) and
+ * frees it again in pstepper_disable(). Returns errno. So 0 on
+ * success, and e.g. ENOSYS on failure.
  */
-void pstepper_enable(pstepper_handler_fn handler, uint64_t upcall_stack_size);
+int pstepper_enable(pstepper_handler_fn handler, uint64_t upcall_stack_size);
 void pstepper_disable(void);
 
 #endif /* PSTEPPER_H_ */
