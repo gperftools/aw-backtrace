@@ -144,7 +144,7 @@ aw-backtrace looks superior, even with fast-path limitations. It is
 also incredibly fast at converting multi-gigabyte perf recordings in
 seconds (and without any caching!).
 
-Another form of testing is in the sibling project unwind-check,
+Another form of testing is in the sibling project [unwind-check](https://github.com/gperftools/unwind-check),
 which performs "offline" analysis of code's stack/call-frame-slot
 effects against CFI unwind info. Mismatches that I discovered and
 verified manually are not due to bad unwind info
