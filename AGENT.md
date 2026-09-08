@@ -37,14 +37,19 @@ The contract:
 bzlmod, one top-level package, module `aw-backtrace`.
 
 ```
-bazel test ...:all               # the normal loop: 12 tests
+bazel test ...:all               # the normal loop: 15 tests
 bazel test -c opt ...:all        # NDEBUG: drops assert(), keeps CHECK()
 ./test-all-cfg.rb                # gcc/clang x dbg/opt sweep, all four green
 ```
 
-Eleven tests: nine in the top package plus `//perf-convert`'s two. `:all` instead
-of `...:all` skips perf-convert. `v/mini-x86-int` is in `.bazelignore`, so
-`@mini-x86-int//:sim_stepper_test` runs only by explicit label.
+Fifteen tests under `...:all`: ten in the top package, `//perf-convert`'s
+two, and `//v/mini-x86-int`'s three. Bare `:all` runs only the ten
+top-package tests — the rest need the `...`.
+
+`v/mini-x86-int` is an ordinary package in this module now (folded in from
+what was briefly its own `local_path_override`'d module, never published).
+Its targets are `target_compatible_with` linux/x86-64, so its three tests
+just skip on other platforms; on x86-64 they ride in the `...:all` loop.
 
 Traps worth knowing before you fight the build:
 
@@ -66,9 +71,11 @@ Traps worth knowing before you fight the build:
 * **`.bazelrc` is for *this* workspace only.** It forces `-std=c++20` across the
   whole graph so abseil matches what `//perf-convert` compiles against. It does
   nothing for anyone depending on us.
-* **`.bazelversion` pins 9.2.0, load-bearing.** `dev_dependency` belongs on the
-  `bazel_dep` line; 9.2.0 rejects it on `local_path_override` and every `bazel`
-  invocation dies.
+* **`.bazelversion` pins 9.2.0.** If you ever re-introduce an override
+  (`local_path_override` / `git_override`), note that `dev_dependency` belongs
+  on the `bazel_dep` line only — 9.2.0 rejects it on the override and every
+  `bazel` invocation dies. (This is why `v/mini-x86-int` is a plain in-tree
+  package rather than an override.)
 * **GNU ld intermittently segfaults linking this package.** Worked around with
   `features = ["-supports_start_end_lib"]` on the targets that hit it — a
   toolchain interaction, not a code bug. Copy the line onto any new binary
@@ -79,6 +86,9 @@ Traps worth knowing before you fight the build:
   an empty macro — it emitted VEX unconditionally and `SIGILL`ed on pre-AVX.
 * **`v/mini-x86-int` is "vendored" only mechanically** — co-developed, same
   author, no upstream. A fix belonging in the stepper goes in the stepper.
+  Its `BUILD.bazel` targets carry `includes = ["."]` so the sources' `base/…`
+  quote-includes (and dependents' bare `#include "sim_stepper.h"`) resolve the
+  way they did when the directory was its own module root.
 * `:aw-backtrace` is the only public target and the only public header
   (`include/aw-backtrace/aw-backtrace.h`, via `strip_include_prefix`).
 * `with-exit.h` is header-only: `WithExit::Run`/`Exit` are a thin

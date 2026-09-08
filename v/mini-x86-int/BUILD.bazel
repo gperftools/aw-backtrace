@@ -1,11 +1,17 @@
-# Note, this file is auto-generated from generate_builds.rb. So if you
-# intend to make longer-lasting changes, make them over there.
+# Folded into aw-backtrace as a plain package; edit directly (the generator
+# script that once produced this no longer travels with the code).
+# linux/x86-64 only, like the differential-testing apparatus it serves.
 
-load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
 DEFAULT_COPTS = []  #["-std=c++20 -fsized-deallocation"]
+
+LINUX_X86_64 = [
+    "@platforms//os:linux",
+    "@platforms//cpu:x86_64",
+]
 
 cc_library(
     name = "mini-x86-int",
@@ -15,6 +21,8 @@ cc_library(
         "performs.S",
     ],
     copts = DEFAULT_COPTS,
+    includes = ["."],
+    target_compatible_with = LINUX_X86_64,
 )
 
 cc_library(
@@ -26,6 +34,8 @@ cc_library(
     ],
     hdrs = ["base/single_stepper.h"],
     copts = DEFAULT_COPTS,
+    includes = ["."],
+    target_compatible_with = LINUX_X86_64,
 )
 
 cc_library(
@@ -33,6 +43,8 @@ cc_library(
     srcs = ["sim_stepper.cc"],
     hdrs = ["sim_stepper.h"],
     copts = DEFAULT_COPTS,
+    includes = ["."],
+    target_compatible_with = LINUX_X86_64,
     deps = [
         ":mini-x86-int",
         ":single_stepper",
@@ -47,6 +59,7 @@ cc_test(
     ],
     copts = DEFAULT_COPTS,
     linkstatic = True,
+    target_compatible_with = LINUX_X86_64,
     deps = [":mini-x86-int"],
 )
 
@@ -57,6 +70,7 @@ cc_test(
     # needed to prevent GNU ld crashes
     features = ["-supports_start_end_lib"],
     linkstatic = True,
+    target_compatible_with = LINUX_X86_64,
     deps = [
         ":mini-x86-int",
         ":sim_stepper",
@@ -69,5 +83,6 @@ cc_test(
     srcs = ["test-signal-disable.cc"],
     copts = DEFAULT_COPTS,
     linkstatic = True,
+    target_compatible_with = LINUX_X86_64,
     deps = [":sim_stepper"],
 )

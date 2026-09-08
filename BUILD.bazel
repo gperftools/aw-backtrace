@@ -101,7 +101,7 @@ cc_library(
         "@platforms//cpu:x86_64": [
             ":aw-backtrace",
             ":symbolize-backtrace",
-            "@mini-x86-int//:sim_stepper",
+            "//v/mini-x86-int:sim_stepper",
         ],
         "//conditions:default": [],
     }),
@@ -175,7 +175,7 @@ cc_test(
         ":headers",
         ":symbolize-backtrace",
     ] + select({
-        "@platforms//cpu:x86_64": ["@mini-x86-int//:sim_stepper"],
+        "@platforms//cpu:x86_64": ["//v/mini-x86-int:sim_stepper"],
         "//conditions:default": [],
     }),
 )
