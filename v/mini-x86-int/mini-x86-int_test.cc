@@ -66,7 +66,7 @@ static bool IsRightUD2(uint8_t* at_rip) {
 gregset_t sigill_captured_regs;
 ucontext_t sigill_return_context;
 
-static void sigill_handler(int signo, siginfo_t* si, void* _uc) {
+static void sigill_handler(int, siginfo_t*, void* _uc) {
   ucontext_t* uc = static_cast<ucontext_t*>(_uc);
   uint8_t* at_rip = reinterpret_cast<uint8_t*>(uc->uc_mcontext.gregs[REG_RIP]);
   if (!IsRightUD2(at_rip)) {
@@ -81,7 +81,7 @@ static void sigill_handler(int signo, siginfo_t* si, void* _uc) {
 
 ucontext_t jump_into_regs;
 bool jumped;
-static void sigusr1_handler(int signo, siginfo_t*, void* _uc) {
+static void sigusr1_handler(int, siginfo_t*, void* _uc) {
   ucontext_t* uc = static_cast<ucontext_t*>(_uc);
   jumped = true;
   CopyRegs(jump_into_regs.uc_mcontext.gregs, uc->uc_mcontext.gregs);
