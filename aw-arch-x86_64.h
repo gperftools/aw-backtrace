@@ -146,7 +146,7 @@ struct Arch {
 
   static bool DetectPLTEntry(uintptr_t ip, FrameInfo* info, std::pair<uintptr_t, uintptr_t> bounds) {
     // PLT entries on x86-64 are 16-byte aligned.
-    uintptr_t slot_start = ip & ~uintptr_t{0xf}; // yes, we round _back_ to the start of possible plt entry
+    uintptr_t slot_start = ip & ~uintptr_t{0xf};  // yes, we round _back_ to the start of possible plt entry
     uintptr_t slot_offset = ip % 16;
     const uint8_t* code = reinterpret_cast<const uint8_t*>(slot_start);
 

@@ -208,7 +208,7 @@ struct FastPathFrame {
   // Flag bits, we store them in low bits of fp_offset field for efficiency.
   static constexpr uint16_t kFlagInvalid = 0;
   static constexpr uint16_t kFlagEndOfChain = 1;
-  static constexpr uint16_t kFlagSPBased = 2; // CFA is SP-relative
+  static constexpr uint16_t kFlagSPBased = 2;  // CFA is SP-relative
   static constexpr uint16_t kFlagFPBased = 3;  // CFA is FP-relative
   static constexpr uint16_t kFlagMask = 3;
 
@@ -239,7 +239,7 @@ struct FastPathFrame {
   bool operator==(const FastPathFrame&) const = default;
 
   static constexpr FastPathFrame Failure() {
-    return FastPathFrame{}; // see kFlagInvalid being 0 above
+    return FastPathFrame{};  // see kFlagInvalid being 0 above
   }
   static constexpr FastPathFrame EndOfChain() {
     return FastPathFrame{.cfa_offset = 0, .fp_offset = kFlagEndOfChain, .ra_offset = 0};
@@ -567,11 +567,11 @@ decode_insn:
 // instructions on aarch64 (Arch::kCodeAlign, a compile-time constant).
 // Widening to uintptr_t before scaling is what keeps advance_loc4's full
 // uint32 range from overflowing the multiply.
-#define ADVANCE_LOC(by)                                                       \
-  ({                                                                          \
-    uintptr_t adv_bytes = static_cast<uintptr_t>(by) * Arch::kCodeAlign;      \
-    ASSURE(!__builtin_add_overflow(pc, adv_bytes, &pc));                      \
-    PREDICT_FALSE(pc > lookup_pc);                                            \
+#define ADVANCE_LOC(by)                                                  \
+  ({                                                                     \
+    uintptr_t adv_bytes = static_cast<uintptr_t>(by) * Arch::kCodeAlign; \
+    ASSURE(!__builtin_add_overflow(pc, adv_bytes, &pc));                 \
+    PREDICT_FALSE(pc > lookup_pc);                                       \
   })
 
   assert(ptr != 0);

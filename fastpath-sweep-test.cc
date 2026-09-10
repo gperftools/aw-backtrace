@@ -58,7 +58,7 @@ struct Module {
 int CollectModule(struct dl_phdr_info* info, size_t, void* data) {
   auto* out = static_cast<std::vector<Module>*>(data);
   for (int i = 0; i < info->dlpi_phnum; i++) {
-    const ElfW(Phdr)& ph = info->dlpi_phdr[i];
+    const ElfW(Phdr) & ph = info->dlpi_phdr[i];
     if (ph.p_type != PT_GNU_EH_FRAME || ph.p_memsz < sizeof(EHFrameHDRPrefix)) {
       continue;
     }
@@ -107,10 +107,10 @@ TEST(FastPathSweep, AgreesWithFullDecoder) {
   dl_iterate_phdr(CollectModule, &modules);
   ASSERT_FALSE(modules.empty());
 
-  int64_t probes = 0;      // pcs the slow decoder resolved, i.e. the denominator
-  int64_t fast_ok = 0;     // ... of which the fast path also resolved
-  int64_t mismatches = 0;  // ... and disagreed about
-  int64_t fast_only = 0;   // fast path answered where the slow one would not
+  int64_t probes = 0;        // pcs the slow decoder resolved, i.e. the denominator
+  int64_t fast_ok = 0;       // ... of which the fast path also resolved
+  int64_t mismatches = 0;    // ... and disagreed about
+  int64_t fast_only = 0;     // fast path answered where the slow one would not
   int64_t end_of_chain = 0;  // ... in the one shape where that is expected
   int reported = 0;
 
@@ -198,9 +198,10 @@ TEST(FastPathSweep, AgreesWithFullDecoder) {
   // number stays near-total.
   double coverage_pct = (double)fast_ok / (double)probes * 100;
 #if defined(__clang__) && defined(__aarch64__)
-  printf("This clang and aarch64. As of this writing this is \"broken\" in a sense "
-         "of them producing wildly inefficient code and data aligns. "
-         "Instead of adapting fast-path to this nonsensical case, we adapt the test.\n");
+  printf(
+      "This clang and aarch64. As of this writing this is \"broken\" in a sense "
+      "of them producing wildly inefficient code and data aligns. "
+      "Instead of adapting fast-path to this nonsensical case, we adapt the test.\n");
 #else
   EXPECT_GT(coverage_pct, 80);
 #endif
