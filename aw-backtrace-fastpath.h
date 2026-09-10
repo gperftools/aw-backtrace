@@ -205,24 +205,15 @@ struct Access {
 };
 
 struct FastPathFrame {
-  // Flag bits, and why they live in fp_offset rather than cfa_offset.
-  //
-  // Real FP/RA spill offsets are 8-aligned and fit in 16 bits (IsGoodOffset),
-  // so the bottom three bits of fp_offset and ra_offset are dead weight. We
-  // spend fp_offset's on the frame's flags. cfa_offset has no spare value of
-  // its own: on aarch64 the architectural CFA *is* sp+0 (the CIE program is
-  // just `def_cfa sp, 0`) and DW_CFA_def_cfa_offset: 0 appears in every
-  // epilogue, so zero cannot mean "invalid" the way it could on x86-64.
-  //
-  // Keeping the tags out of cfa_offset also earns two things on the hot path:
-  // DW_CFA_def_cfa_offset -- the most frequent state-mutating opcode by a wide
-  // margin -- becomes a plain store instead of a read-modify-write, and
-  // ToFrameInfo uses cfa_offset directly on both the SP and FP branches
-  // instead of masking.
-  static constexpr uint16_t kFlagFPBased = 1;     // CFA is FP-relative, not SP-relative
-  static constexpr uint16_t kFlagValid = 2;       // a real decoded row
-  static constexpr uint16_t kFlagEndOfChain = 4;  // FDE declared the RA undefined
-  static constexpr uint16_t kFlagMask = 7;
+  // Flag bits, we store them in low bits of fp_offset field for efficiency.
+  static constexpr uint16_t kFlagInvalid = 0;
+  static constexpr uint16_t kFlagEndOfChain = 1;
+  static constexpr uint16_t kFlagSPBased = 2; // CFA is SP-relative
+  static constexpr uint16_t kFlagFPBased = 3;  // CFA is FP-relative
+  static constexpr uint16_t kFlagMask = 3;
+
+  // Bit #1 above is 1 when valid (either sp- or fp-based cfa)
+  static constexpr uint16_t kFlagValidMask = 2;
 
   // CFA offset as a plain magnitude: CFA is (SP or FP) + cfa_offset, with
   // kFlagFPBased picking which. Carries no tag bits.
@@ -237,38 +228,34 @@ struct FastPathFrame {
   // aarch64, where a leaf function never spills it at all.
   uint16_t ra_offset;
 
-  uint16_t flags() const {
-    return fp_offset & kFlagMask;
+  constexpr bool IsValid() const {
+    return (fp_offset & kFlagValidMask) != 0;
   }
-  bool IsValid() const {
-    return (fp_offset & kFlagValid) != 0;
-  }
-  bool IsFPBased() const {
+  constexpr bool IsFPBased() const {
     assert(IsValid());
-    return (fp_offset & kFlagFPBased) != 0;
-  }
-  // The frame pointer's spill magnitude with the flags masked off.
-  uint32_t fp_spill_offset() const {
-    return static_cast<uint32_t>(fp_offset) & ~uint32_t{kFlagMask};
+    return (fp_offset & kFlagMask) == kFlagFPBased;
   }
 
   bool operator==(const FastPathFrame&) const = default;
 
   static constexpr FastPathFrame Failure() {
-    return FastPathFrame{};
+    return FastPathFrame{}; // see kFlagInvalid being 0 above
   }
   static constexpr FastPathFrame EndOfChain() {
     return FastPathFrame{.cfa_offset = 0, .fp_offset = kFlagEndOfChain, .ra_offset = 0};
   }
-  constexpr FastPathFrame SwitchToSP() {
-    return FastPathFrame{.cfa_offset = cfa_offset,
-                         .fp_offset = static_cast<uint16_t>(fp_offset & ~uint16_t{kFlagFPBased}),
-                         .ra_offset = ra_offset};
+  constexpr FastPathFrame DoSetFlags(uint16_t flags_value) const {
+    uint16_t fo = fp_offset & ~uint16_t{kFlagMask};
+    fo |= flags_value;
+    return FastPathFrame{.cfa_offset = cfa_offset, .fp_offset = fo, .ra_offset = ra_offset};
   }
-  constexpr FastPathFrame SwitchToFP() {
-    return FastPathFrame{.cfa_offset = cfa_offset,
-                         .fp_offset = static_cast<uint16_t>(fp_offset | kFlagFPBased),
-                         .ra_offset = ra_offset};
+  constexpr FastPathFrame SwitchToSP() const {
+    assert(IsValid());
+    return DoSetFlags(kFlagSPBased);
+  }
+  constexpr FastPathFrame SwitchToFP() const {
+    assert(IsValid());
+    return DoSetFlags(kFlagFPBased);
   }
   static constexpr bool IsGoodOffset(int32_t offset) {
     if (PREDICT_FALSE(offset >= 0)) {
@@ -294,42 +281,41 @@ struct FastPathFrame {
     }
     return true;
   }
-  constexpr FastPathFrame SetCFAOffset(uint32_t offset) {
+  constexpr FastPathFrame SetCFAOffset(uint32_t offset) const {
     assert(IsGoodCFAOffset(offset));
     return FastPathFrame{.cfa_offset = offset, .fp_offset = fp_offset, .ra_offset = ra_offset};
   }
-  constexpr FastPathFrame SetFPOffset(int32_t offset) {
+  constexpr FastPathFrame SetFPOffset(int32_t offset) const {
     assert(offset == 0 || IsGoodOffset(offset));
     // -offset is 8-aligned, so it never collides with the flags below it.
     return FastPathFrame{.cfa_offset = cfa_offset,
                          .fp_offset = static_cast<uint16_t>((fp_offset & kFlagMask) | static_cast<uint16_t>(-offset)),
                          .ra_offset = ra_offset};
   }
-  constexpr FastPathFrame SetRAOffset(int32_t offset) {
+  constexpr FastPathFrame SetRAOffset(int32_t offset) const {
     assert(offset == 0 || IsGoodOffset(offset));
     return FastPathFrame{.cfa_offset = cfa_offset, .fp_offset = fp_offset, .ra_offset = static_cast<uint16_t>(-offset)};
   }
 
   bool ToFrameInfo(FrameInfo* info) const {
-    // Ordered for the two shapes that actually occur: a valid row with an
-    // SP-based CFA, then a valid row with an FP-based one. Failure and
-    // end-of-chain are exceptional and live past the early return.
-    if (PREDICT_TRUE(IsValid())) {
+    uint16_t flags = fp_offset & kFlagMask;
+    uint16_t actual_fp_offset = fp_offset & ~kFlagMask;
+
+    if (PREDICT_TRUE((flags & kFlagValidMask) != 0)) {
       // Start from the architectural default row and overwrite what the
       // decoded CFI actually changed. Note *info is reused across frames
       // by the caller, so every field has to be written unconditionally.
       Arch::ResetFrameInfo(info);
 
       const int32_t cfa = static_cast<int32_t>(cfa_offset);
-      // cfa_offset carries no tag bits, so neither branch has to mask.
-      if (PREDICT_TRUE((fp_offset & kFlagFPBased) == 0)) {
+      // SP-based is a little more common, or so I think.
+      if (PREDICT_TRUE(flags == kFlagSPBased)) {
         info->cfa = CfaRule::SpRel(cfa);
       } else {
         info->cfa = CfaRule::FpRel(cfa);
       }
-      const uint32_t fp_spill = fp_spill_offset();
-      if (fp_spill != 0) {
-        info->fp = RegisterRule::MemCfaRel(-static_cast<int32_t>(fp_spill));
+      if (actual_fp_offset != 0) {
+        info->fp = RegisterRule::MemCfaRel(-static_cast<int32_t>(actual_fp_offset));
       }
       // Zero leaves whatever Arch::ResetFrameInfo set: RA at CFA - 8 on
       // x86-64, live in the RA register on aarch64.
@@ -339,7 +325,7 @@ struct FastPathFrame {
       return true;
     }
 
-    if (flags() == kFlagEndOfChain) {
+    if (flags == kFlagEndOfChain) {
       Arch::ResetFrameInfo(info);
       info->ra = RegisterRule::Undefined();
       return true;
@@ -348,7 +334,7 @@ struct FastPathFrame {
   }
 
   static constexpr FastPathFrame ArchDefault() {
-    return FastPathFrame{.cfa_offset = Arch::kInitialCFAOffset, .fp_offset = kFlagValid, .ra_offset = 0};
+    return FastPathFrame{.cfa_offset = Arch::kInitialCFAOffset, .fp_offset = kFlagSPBased, .ra_offset = 0};
   }
 };
 
