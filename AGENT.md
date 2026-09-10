@@ -196,8 +196,8 @@ Cache counters only exist when `AW_BUMP_STATS_IN_PRODUCTION` is defined —
   process image. `Optionalize()` turns a reader `Fail()` into `std::nullopt`, so
   "must be rejected" is an `EXPECT_EQ`. Stops at the byte-level helpers.
 * `symbolize-backtrace-test.cc` — installs a **`SIGCHLD` handler that
-  `abort()`s** first thing in `main`; that is the assertion for §4.5's whole
-  design. Also the repeated-PC regression test and
+  `abort()`s** first thing in `main`: a healthy symbolizer daemon must never
+  deliver one to its owner (§4.5). Also the repeated-PC regression test and
   `DumpStackTraceWithClosedStdio` (symbolizes with 0/1/2 closed).
 * `comparer-longjmp.cc` → `cjm`/`cjm0` — the first in-tree program written to
   make the comparer *fail*: `_longjmp` out of deep recursion, then a frame
@@ -209,9 +209,10 @@ Cache counters only exist when `AW_BUMP_STATS_IN_PRODUCTION` is defined —
 * `aw-addrcheck-test.c`, `bench-addrcheck.c` — unit test / microbenchmark. The
   test `#undef NDEBUG`s at the top because it asserts for effect.
 * `symbolize-backtrace.{h,cc}` + `sym-helper.cc` — async-signal-safe
-  symbolization; `sym-helper` is embedded as a blob, written out, spawned, and
-  shells to addr2line. **Diagnostics and tests only, never the capture path.**
-  The spawning half is the subtlest code in the tree after the cache — §4.5.
+  symbolization; `sym-helper` is embedded as a blob and spawned once per
+  process image as a daemon that keeps an `addr2line` per binary and answers
+  requests over a socketpair. **Diagnostics and tests only, never the capture
+  path.** The spawn and the protocol are §4.5.
 * `v/mini-x86-int/` — co-developed sibling: partial x86-64 interpreter +
   `sim_stepper` providing the per-instruction callback the comparer rides on.
   **No `ptrace` anywhere in it** — stepping is `EFLAGS.TF` plus an `SA_ONSTACK`
@@ -407,33 +408,86 @@ byte behind as padding and the size assert still passes. That happened once.
 `CompressedFrameInfo` is what actually catches it, which is why the struct
 carries an explicit `unused` member rather than a hole.
 
-### 4.5 Spawning the symbolizer helper
+### 4.5 The symbolizer daemon
 
 Diagnostics-only code, documented here because it is the one place where
 *process*-level details carry the correctness argument: the comparer preloads
-into arbitrary host processes, and a symbolizer that spawns a visible child
+into arbitrary host processes, and a symbolizer that spawns visible children
 perturbs whatever process management the host is doing.
 
-`WithSpawnedChild` builds a two-level sandwich: the caller blocks all signals
-and clones an **intermediate** (`CLONE_VM | CLONE_VFORK`), which clones the
-**helper**, runs the caller's body itself, reaps the helper and relays its
-status. Every layer of that is load-bearing and the reasoning is commented in
-the file — the short version is that `execve` unconditionally resets
-`exit_signal` to `SIGCHLD`, so an intermediate that never execs is the only way
-to keep a `SIGCHLD` from reaching the host or showing up in its `wait(-1)`; that
-`CLONE_VFORK` suspends the caller, so the body has to run in the intermediate or
-the pipe deadlocks; and that `CLONE_VM` is what lets the output land in the
-caller's address space anyway. Don't simplify a layer away without reading why
-it is there.
+**One persistent `sym-helper` per process image, spawned lazily and talked to
+over a mailbox.** The first symbolization (`EnsureHelperOwner`) spawns the
+daemon and keeps one end of an `AF_UNIX` `SOCK_SEQPACKET` socketpair; every
+request after that is a single datagram on it carrying two descriptors via
+`SCM_RIGHTS`:
 
-**Descriptors 0/1/2 are the recurring hazard here, twice over.** A target may
-close its standard descriptors — glibc's `close_stdout` atexit handler does —
-and then `memfd_create` and `pipe()` hand back numbers in that range, where the
-helper's `dup2` onto stdout collides with them. Both sites are guarded now, with
-`DumpStackTraceWithClosedStdio` as the regression test. Neither symptom was
-loud: the memfd one crashed on a `CHECK`, the pipe one made every symbolized
-dump come back silently **empty**. Assume a third descriptor acquired here has
-the same problem.
+* a memfd holding the request — the addresses plus the caller's own
+  `/proc/self/maps` snapshot — which the daemon truncates and rewrites in place
+  with a flat binary response the caller simply `mmap`s;
+* the write end of a pipe made fresh for this request, which carries no data:
+  its close is the "response committed" signal. A daemon that dies mid-request
+  closes it too, which is why the caller checks `kSymResponseMagic` before
+  trusting the memfd.
+
+The daemon serves one request at a time and keeps one `addr2line` per binary
+alive across requests. Because each request's state is private to its own
+memfd and pipe, and `sendmsg` is atomic per datagram, concurrent callers —
+threads, or a forked child sharing the inherited mailbox — need no locking. The
+one serialized thing is the spawn itself, under a CAS spinlock with every signal
+blocked.
+
+The maps snapshot being the *caller's* view is deliberate: under qemu-user it is
+the guest view QEMU synthesizes, which is what makes guest addresses resolve.
+
+**The spawn is a plain `vfork` + `execve`**, of the embedded blob written to a
+memfd and run as `/proc/self/fd/N`, with all signals blocked around it; the
+child restores an empty mask before it execs. Two details matter:
+* **Only `PATH` is passed on**, so `LD_PRELOAD` — the comparer — does not follow
+  into the daemon.
+* **The mailbox is `CLOEXEC`**, so a child that forks without exec shares its
+  parent's daemon, while an exec'd child is a fresh image that spawns its own.
+
+**`SIGCHLD` is a tradeoff now, not an absolute.** Healthy operation produces
+none for the host: the `addr2line`s are the daemon's children, reaped by it with
+`SIGCHLD` ignored, and the daemon itself exits only on mailbox EOF, i.e. after
+every holder of the owner's end is gone, so its exit reaches init or a
+subreaper, not the host. What is accepted is exactly one ordinary `SIGCHLD` if
+the daemon dies while its owner is alive — in practice an `execve` failure right
+at spawn. `symbolize-backtrace-test`'s abort-on-`SIGCHLD` handler pins the
+healthy case.
+
+**Descriptors 0/1/2 remain the recurring hazard.** A target may close its
+standard descriptors — glibc's `close_stdout` atexit handler does — so the
+socketpair, memfd and pipe created on the caller's side can land in that range.
+The daemon absorbs it at a single point: before anything else it moves its
+inherited mailbox descriptor to 16 or above, then reopens 0/1/2 (onto
+`/dev/null`, or stderr onto `/dev/tty` in debug builds), so request descriptors
+never arrive where a standard one is expected. `DumpStackTraceWithClosedStdio`
+is the regression test, with stdin both open and closed — but it runs after the
+daemon already exists, so it covers the per-request memfd and pipe, not the
+spawn-time case where the daemon's own end of the mailbox is the descriptor at
+risk. The spawn code this
+replaced had two such bugs and neither was loud — one crashed on a `CHECK`, the
+other made every dump come back silently **empty** — so a report with no body
+means look here first, and any new descriptor handed across should be assumed to
+have the same problem.
+
+**A failed request still produces frames.** When the daemon cannot answer — dead,
+never spawned, or died mid-request — `ReportUnsymbolized` stands in for it: each
+pc with its module and ELF vaddr from `_dl_find_object` (the main executable
+shows up as the literal `/proc/self/exe`), no function or line, plus one
+`sym-helper request failed` line on stderr. The daemon is not respawned, so once
+it is gone every later dump in the process looks like that.
+`symbolize-backtrace-test`'s last case shuts the mailbox down through
+`test_only_symbolize_backtrace_kill_daemon` — a real `sendmsg` failure, and EOF
+for the daemon, which exits — then checks that frame 0's pc and vaddr match what
+the live daemon printed.
+
+**The daemon closes every descriptor it inherited** except its mailbox and the
+freshly reopened 0/1/2. It lives as long as its owner, so any host descriptor
+that lacked `CLOEXEC` would otherwise stay open with it — and if that is a
+pipe's write end, the host's reader never sees EOF and a make or shell pipeline
+hangs.
 
 ### 4.6 The comparer's shadow stack
 
@@ -717,7 +771,10 @@ should the outcome ever be routed back through `kOk`.
   else. When a run isn't clean: **check the exit code**, not just the mismatch
   count, and **check that a report has a body** — a `Mismatch at 1` with no
   `--bad:`/`--good:` lines means symbolization returned nothing, which is a bug
-  in the spawn path (§4.5), not in the unwinder.
+  in the symbolizer daemon or its protocol (§4.5), not in the unwinder. Frames
+  that all read `(:0)` next to a `sym-helper request failed` line on stderr are
+  the other symbolizer failure: the daemon is gone and the dump fell back to raw
+  addresses.
 
 ## 6. Known gaps
 
