@@ -58,6 +58,19 @@ int dl_iterate_phdr_with_fn(aw_backtrace_internal::FunctionRef<int(struct dl_phd
 // LD_PRELOAD. Its constructor runs dl_iterate_phdr and finds all
 // initially loaded objects. Those are then segments of addresses that
 // we're willing to put in our caches.
+//
+// What we record is their *executable* PT_LOAD segments, and that serves two
+// callers. One is cacheability, above. The other is ExecutableBoundsFor: a
+// segment is a contiguous mapping with no PROT_NONE alignment holes in it, so
+// "which segment is this pc in" is also a safe answer to "how far either way
+// may code bytes be read", which the fallback chain's byte matchers need.
+// Answering it from here costs a binary search; answering it from
+// /proc/self/maps costs a snapshot and a parse of the whole file on every
+// call, unless the kernel has PROCMAP_QUERY.
+//
+// Executable segments are enough because every address anyone looks up here
+// is a pc. The union of a module's PT_LOADs, which this used to record, is
+// both wider than needed and unusable as read bounds.
 
 struct LoadedSetHolder {
   bool initialized;
@@ -70,14 +83,28 @@ struct LoadedSetHolder {
     return {std::span<const std::pair<uintptr_t, uintptr_t>>(*vec_storage.get())};
   }
 
-  bool IsCacheableAddr(uintptr_t addr) const {
+  // The executable segment containing addr, or an empty range. Returns {0, 0}
+  // rather than std::nullopt to match ExecutableBoundsFor's existing "empty
+  // means no" convention; callers test first != second.
+  //
+  // Before Initialize() this reports nothing, so early-constructor unwinds
+  // fall through to /proc/self/maps as they always did.
+  std::pair<uintptr_t, uintptr_t> FindExecutableSegment(uintptr_t addr) const {
     std::optional<std::span<const std::pair<uintptr_t, uintptr_t>>> maybe_loaded = loaded_set();
     if (!maybe_loaded) {
-      return false;
+      return {};
     }
     auto it = std::upper_bound(maybe_loaded->begin(), maybe_loaded->end(), addr,
                                [](uintptr_t addr, const auto& pair) -> bool { return addr < pair.second; });
-    return it != maybe_loaded->end() && it->first <= addr;
+    if (it != maybe_loaded->end() && it->first <= addr) {
+      return *it;
+    }
+    return {};
+  }
+
+  bool IsCacheableAddr(uintptr_t addr) const {
+    auto [start, end] = FindExecutableSegment(addr);
+    return start != end;
   }
 
   void Initialize() {
@@ -85,25 +112,23 @@ struct LoadedSetHolder {
 
     std::vector<std::pair<uintptr_t, uintptr_t>> loaded_set;
     dl_iterate_phdr_with_fn([&](struct dl_phdr_info* info, size_t) -> int {
-      // We inspect all PT_LOAD headers and compute union of their
-      // load addresses. This interval is then appended to loaded_set.
-
+      // Each executable PT_LOAD becomes its own entry -- see the note above
+      // the struct. A module can legitimately have more than one.
       uintptr_t load_bias = info->dlpi_addr;
-      uintptr_t map_start = ~uintptr_t{0};
-      uintptr_t map_end = 0;
       std::span<const ElfW(Phdr)> all_phdrs{info->dlpi_phdr, (size_t)info->dlpi_phnum};
       for (const auto& phdr : all_phdrs) {
-        if (phdr.p_type != PT_LOAD) {
+        if (phdr.p_type != PT_LOAD || (phdr.p_flags & PF_X) == 0) {
           continue;
         }
+        // Deliberately the segment's own extent, not the page-rounded mapping
+        // the kernel actually made. Tighter is the safe direction here: it can
+        // only make a byte matcher decline, never read past what the object
+        // declared.
         uintptr_t start = load_bias + phdr.p_vaddr;
         uintptr_t end = start + phdr.p_memsz;
-        map_start = std::min(map_start, start);
-        map_end = std::max(map_end, end);
-      }
-
-      if (map_start < map_end) {
-        loaded_set.emplace_back(map_start, map_end);
+        if (start < end) {
+          loaded_set.emplace_back(start, end);
+        }
       }
       return 0;
     });
@@ -162,6 +187,13 @@ class LazyAddrChecker {
     return get()->Lookup(addr);
   }
   std::pair<uintptr_t, uintptr_t> ExecutableBoundsFor(uintptr_t addr) {
+    // Initially-loaded modules answer without a syscall, which is nearly
+    // always. Only what is not there needs /proc/self/maps: JIT-ed code,
+    // anything dlopen'd after our constructor, bare anonymous exec mappings.
+    auto bounds = cacheable_addrs.FindExecutableSegment(addr);
+    if (bounds.first != bounds.second) {
+      return bounds;
+    }
     return get()->ExecutableBoundsFor(addr);
   }
 

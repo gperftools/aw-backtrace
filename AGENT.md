@@ -375,6 +375,19 @@ implementation is two layers: `FrameInfoCache` is policy (compression,
 cacheability) and `UnwindInfoCache`, which is storage and eviction
 and knows nothing about the unwinder.
 
+**`LoadedSetHolder` is what says which addresses those are**, and it does
+double duty. Its constructor records the *executable* `PT_LOAD` segments of
+every module `dl_iterate_phdr` reports, one entry each, sorted. Executable
+segments are enough because every address anyone looks it up with is a pc; and
+a single segment, unlike the union of a module's `PT_LOADs` it used to record,
+is a contiguous mapping with no `PROT_NONE` alignment holes — which is what
+makes the same table a safe answer to `ExecutableBoundsFor` (§4.1), instead of
+a `/proc/self/maps` snapshot per call on kernels without `PROCMAP_QUERY`. The
+recorded extent is the segment's own, not the page-rounded mapping: tighter can
+only make a byte matcher decline, never read past what the object declared.
+Anything not in the table — JIT, post-constructor `dlopen`, bare anonymous exec
+mappings — still goes to `aw-addrcheck`.
+
 **The whole entry is one 128-bit atomic** — 8 bytes key+flags, 8 bytes
 compressed `FrameInfo` — and the rest follows: no seqlock, no lock bit, no retry
 loop, because a reader can never catch a half-written value. The only cleanup is
