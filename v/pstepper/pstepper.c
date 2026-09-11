@@ -31,7 +31,7 @@ __attribute__((noreturn)) void pstepper_die(const char *msg)
 	abort();
 }
 
-uint64_t pstepper_syscall(uint64_t cmd, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4)
+int pstepper_syscall(uint64_t cmd, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4)
 {
 	return syscall(PSTEPPER_SYSCALL_NR, cmd, arg1, arg2, arg3, arg4);
 }
