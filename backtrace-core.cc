@@ -36,6 +36,11 @@ class FrameLookupState : public UnwindVisitor {
   LookupOutcome DoLookup(const EHReaderInputs& inputs, FrameInfo* info) {
     info_ = info;
     FindAndDecodeFDE(inputs, this);
+    // Decided here, on the row that actually covers pc_, rather than in
+    // HandleUndefined when the instruction goes by -- see there.
+    if (outcome_ == LookupOutcome::kOk && info_->ra.kind == RegisterRule::Kind::Undefined) {
+      outcome_ = LookupOutcome::kUndefinedRA;
+    }
     return outcome_;
   }
 
@@ -224,17 +229,19 @@ class FrameLookupState : public UnwindVisitor {
       return true;
     }
     if (reg == Arch::kRAReg) {
-      // In startup object we actually have a case were RIP is set to
-      // undefined because there is nothing to return to. While we bail
-      // out in this case (nothing to backtrace further), lets not
-      // report any specific errors, since it is "normal".
+      // A frame with nothing to return to: the process and thread entry
+      // points, _dl_start_user, clone's child. Normal, so no diagnostic.
       //
-      // NOTE: we used to only stay quiet when this was the FDE's last
-      // instruction, which is the only place it legitimately occurs.
-      // The reader doesn't show us the position past the instruction
-      // we're being told about, so we can't tell anymore. Either way
-      // the frame fails; only the diagnostic differs.
-      return false;
+      // Record the rule and keep decoding rather than stopping here. Whether
+      // this applies is a property of the row covering pc_, not of where the
+      // instruction sits in the FDE's stream, and DoLookup reads it off the
+      // finished row. Stopping here was harmless while every failure fed the
+      // fallback chain, which might still recover the frame; now that this
+      // outcome ends the walk, an Undefined in a row *preceding* pc_'s --
+      // with RA defined again afterwards by a later offset/restore -- would
+      // silently truncate the backtrace instead.
+      info_->ra = RegisterRule::Undefined();
+      return true;
     }
     return ReportError("undefined for critical register %lu", (unsigned long)reg);
   }

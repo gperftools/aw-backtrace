@@ -127,7 +127,8 @@ TEST(FastPathSweep, AgreesWithFullDecoder) {
       }
       for (uintptr_t pc : {lo, lo + (hi - lo) / 4, lo + (hi - lo) / 2, hi - 1}) {
         FrameInfo slow;
-        if (DoUnwindLookup(pc, &slow, {}) != LookupOutcome::kOk) {
+        const LookupOutcome slow_outcome = DoUnwindLookup(pc, &slow, {});
+        if (slow_outcome != LookupOutcome::kOk) {
           // The fast path claiming to know something the full decoder
           // refuses is a fast-path bug, so this case is still checked --
           // it just is not part of the coverage denominator.
@@ -135,18 +136,14 @@ TEST(FastPathSweep, AgreesWithFullDecoder) {
           EHReaderInputs* eh = LocateEHFrame(pc, &storage);
           FrameInfo fast;
           if (eh && TryFastFrameInfo(eh->eh_frame_start, eh->eh_frame_end, eh->eh_frame_hdr, pc).ToFrameInfo(&fast)) {
-            if (fast.ra.kind == RegisterRule::Kind::Undefined) {
-              // The one shape where the two decoders legitimately part ways,
-              // and it predates the aarch64 work. DW_CFA_undefined on the RA
-              // column marks a frame with nothing to return to -- the process
+            if (slow_outcome == LookupOutcome::kUndefinedRA && fast.ra.kind == RegisterRule::Kind::Undefined) {
+              // Both decoders saying the same thing: DW_CFA_undefined on the
+              // RA column, a frame with nothing to return to -- the process
               // and thread entry points, _dl_start_user, clone's child. The
-              // fast path reports it as EndOfChain and stops. The full
-              // decoder's HandleUndefined instead returns false, so
-              // DoUnwindLookup reports kFail (quietly -- it is a "normal
-              // stop", per backtrace-core.cc) and UnwindLoop goes on to the
-              // fallback chain, where a guess may or may not manufacture one
-              // more frame. Both stop the walk here in practice; only the
-              // route differs.
+              // fast path calls it EndOfChain, the full decoder kUndefinedRA,
+              // and both stop the walk. It is an agreement that simply is not
+              // part of the coverage denominator, since the slow path did not
+              // return kOk.
               end_of_chain++;
             } else {
               fast_only++;

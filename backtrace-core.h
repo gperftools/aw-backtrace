@@ -20,6 +20,11 @@ struct DiagFlags {
 
 enum class LookupOutcome {
   kOk,
+  // The row covering the pc has an explicit Undefined rule on the return
+  // address column: a frame with nothing to return to, which is an answer
+  // rather than a failure. Callers stop the walk; they must not treat it as
+  // missing information and go looking for a substitute.
+  kUndefinedRA,
   kFail,
   // The lookup failed specifically because it hit an unsupported
   // DW_CFA_{def_cfa_,}expression on a register/CFA we track. Callers use

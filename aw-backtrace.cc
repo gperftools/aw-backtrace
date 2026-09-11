@@ -506,6 +506,15 @@ void UnwindLoop(Cursor cursor, const ucontext_t* in_uc, aw_backtrace_callback ca
       }
     }
 
+    if (outcome == LookupOutcome::kUndefinedRA) {
+      // The FDE says this frame has nothing to return to. That is an explicit
+      // answer, not missing information, so it outranks the whole fallback
+      // chain below -- no PLT sniff, no trampoline match, no guess, and in
+      // particular no ExecutableBoundsFor, which without PROCMAP_QUERY is a
+      // /proc/self/maps read on the one frame that ends every backtrace.
+      break;
+    }
+
     {
       std::pair<uintptr_t, uintptr_t> pc_bounds = checker.ExecutableBoundsFor(lookup_pc);
 

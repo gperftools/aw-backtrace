@@ -272,6 +272,16 @@ therefore break only on `pc == 0 && !is_leaf`, which is also what keeps
 and `arm64-leaf-test.cc`; libgcc and libunwind both give up here, so there is no
 reference implementation to diff against.
 
+A lookup that comes back `kUndefinedRA` is **not** "nothing": the row covering
+the pc carries an explicit `DW_CFA_undefined` on the return-address column, so
+the frame has nothing to return to and the walk stops right there. Skipping the
+chain below matters for more than tidiness — it is the frame that ends *every*
+backtrace (`_start`), and the chain's first act is an `ExecutableBoundsFor`.
+That call is answered from `LoadedSetHolder`'s executable-segment table (§4.4)
+for anything in an initially-loaded module, and only falls through to
+`aw-addrcheck` otherwise — where, without `PROCMAP_QUERY`, it is a snapshot and
+parse of the whole of `/proc/self/maps`.
+
 When the lookup produces nothing, a **fallback chain** runs in this order: PLT
 detection (leaf only) → signal-trampoline byte match → DRAP (x86-64, and only
 if the failure was a CFI expression) → refuse outright if it was a CFI
@@ -310,8 +320,18 @@ normally. Either way the caller only sees an outcome code.
 
 Unsupported things report and fail the frame rather than guessing, with a few
 deliberate exceptions the code calls out: expressions on non-critical registers,
-`DW_CFA_undefined` on RA (a normal stop — crt startup has nothing to return to),
-and unknown registers, so a future greg expansion won't break unwinding.
+`DW_CFA_undefined` on RA (not a failure at all — it is reported as its own
+outcome, `kUndefinedRA`, see §4.1), and unknown registers, so a future greg
+expansion won't break unwinding.
+
+**`DW_CFA_undefined` on RA is decided by the row, not by the instruction.**
+`HandleUndefined` records `RegisterRule::Undefined()` and keeps decoding;
+`DoLookup` converts a rule that survives into the row covering the pc. Bailing
+out the moment the opcode goes by was harmless while the outcome fed the
+fallback chain — a guess might still recover the frame — but it is not
+row-accurate, and now that the outcome *stops the walk*, an Undefined in a row
+preceding the pc's (with RA defined again by a later `DW_CFA_offset` /
+`DW_CFA_restore`) would silently truncate the backtrace.
 
 **The asymmetry above is a live trap when editing `backtrace-core.cc`.** The
 reader exits non-locally; the visitor does not. So a visitor helper that detects
@@ -614,23 +634,24 @@ both decoders, and demands an exact `FrameInfo` match. It is the reason the
 aarch64 fast path can be trusted at all, and it is a better oracle for *this
 component* than the comparer is, on either arch.
 
-Two comparisons are deliberately not exact:
+One comparison is deliberately not exact, and it is an agreement rather than a
+divergence. `DW_CFA_undefined` on the RA column — the frames with nothing to
+return to: process and thread entry points, `_dl_start_user`, `clone`'s child —
+is reported by the fast path as `EndOfChain` and by the full decoder as
+`kUndefinedRA` (§4.2), and both stop the walk. Since the slow path does not
+return `kOk`, those probes are outside the coverage denominator; the sweep
+counts them (single digits out of ~36k) rather than treating them as a
+mismatch. The check requires *both* sides to say so, which is what stops it
+excusing a fast path that invents an end of chain the FDE does not have.
 
-* **Both saying "the walk stops" is a match** however they spell it. When
-  `ra.kind == Undefined` neither loop reads `cfa` or `fp` before breaking, so
-  the fast path's architectural-default row and the slow path's last-decoded
-  row are indistinguishable.
-* **`DW_CFA_undefined` on the RA column is a real, pre-existing asymmetry.**
-  The fast path calls it `EndOfChain` and stops. `HandleUndefined` in
-  `backtrace-core.cc` instead returns false, so `DoUnwindLookup` reports
-  `kFail` — quietly, because it is a "normal stop" — and `UnwindLoop` carries
-  on into the fallback chain, where `GuessUnwindInfo` may manufacture one more
-  frame. It shows up on exactly the frames with nothing to return to (process
-  and thread entry points, `_dl_start_user`, `clone`'s child): 12 probes out
-  of ~43k. This predates the aarch64 work and is identical on x86-64 — the
-  comparer never flagged it because the guess also fails at `_start`. The
-  sweep counts these rather than failing on them. Worth resolving one day;
-  the fast path is the one behaving as §4.2 describes.
+This used to be a genuine asymmetry — the full decoder reported a plain `kFail`
+and `UnwindLoop` carried on into the fallback chain, where `GuessUnwindInfo`
+might manufacture one more frame — and the comparer never flagged it because
+the guess also fails at `_start`. What eventually surfaced it was cost, not
+correctness: a `/proc/self/maps` read on the last frame of every backtrace.
+`EquivalentForUnwinding` in the sweep still carries the representation
+exemption for two Undefined rules; it is now unreachable, kept as a backstop
+should the outcome ever be routed back through `kOk`.
 
 ## 5. Conventions and gotchas
 
