@@ -118,7 +118,7 @@ class FrameLookupState : public UnwindVisitor {
     } else if (reg == Arch::kFPReg) {
       info_->cfa = CfaRule::FpRel(o32);
     } else {
-      int8_t r;
+      int8_t r = 0;
       if (!NarrowReg(reg, "def_cfa", &r)) {
         return false;
       }
@@ -170,14 +170,13 @@ class FrameLookupState : public UnwindVisitor {
   // For everything else we don't look at it at all -- see the comment at
   // the bottom about ignoring unknown registers.
   bool HandleRegister(uintptr_t reg, uintptr_t stored_in_reg) {
+    int8_t r = 0;
     if (reg == Arch::kRAReg) {
-      int8_t r;
       if (!NarrowReg(stored_in_reg, "register", &r)) {
         return false;
       }
       info_->ra = RegisterRule::InReg(r);
     } else if (reg == Arch::kFPReg) {
-      int8_t r;
       if (!NarrowReg(stored_in_reg, "register", &r)) {
         return false;
       }
