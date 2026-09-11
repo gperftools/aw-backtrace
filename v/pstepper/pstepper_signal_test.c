@@ -21,7 +21,9 @@
  *   - no instruction is ever delivered to the step handler twice in a row
  *     (the old double-delivery);
  *   - signals actually landed while an upcall was in flight (g_sig_in_upcall
- *     > 0), so the fixed path was genuinely exercised;
+ *     > 0), so the fixed path was genuinely exercised -- the itimer covers
+ *     the asynchronous case, and the upcall handler also raises a bounded few
+ *     itself so this does not depend on winning a race;
  *   - any step upcalls seen for code on the altstack (a signal that landed
  *     at the one boundary per step with no trap parked -- harmless, handler
  *     just runs stepped) never break the above.
@@ -79,6 +81,25 @@ static void handler(int uxi_kind, void *info, ucontext_t *uc)
 
 	if (on_altstack(rsp)) {
 		g_steps_on_altstack++;
+	}
+
+	/*
+	 * Force a handful of deliveries into the parked window directly. The
+	 * itimer below covers the genuinely asynchronous case, but whether any
+	 * of its ticks lands *inside* an upcall is a race whose odds are
+	 * (upcall time / total time) -- and that ratio is not a constant of the
+	 * design: it collapsed once the plugin stopped delivering callbacks
+	 * while a trap is parked, which left the coverage assertion at the
+	 * bottom of this file failing on a run that was otherwise perfect. A
+	 * signal raised from here is pending immediately and QEMU delivers it
+	 * at the next instruction boundary, which is still inside this upcall,
+	 * so the interposed-handler path is exercised on purpose rather than by
+	 * luck. Bounded, so the async ticks still dominate the run.
+	 */
+	static int forced;
+	if ((g_steps & 0x3ff) == 0 && forced < 8) {
+		forced++;
+		raise(SIGALRM);
 	}
 
 	g_in_upcall = 0;

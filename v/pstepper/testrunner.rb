@@ -84,7 +84,7 @@ def cmd_run(argv)
   FileUtils.mkdir_p(TESTDIR)
   log = log_path(name)
 
-  cmd = [qemu, '-one-insn-per-tb', '-plugin', PLUGIN, "./#{binary}", *extra]
+  cmd = [qemu, '-plugin', PLUGIN, "./#{binary}", *extra]
 
   started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   ok = File.open(log, 'w') do |out|

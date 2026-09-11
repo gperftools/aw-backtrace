@@ -20,27 +20,35 @@
  * full design rationale (this replaces an earlier version that fabricated
  * a full ucontext_t, including eflags, directly in the plugin).
  *
- * REQUIRES `-one-insn-per-tb` on the qemu command line.
+ * REQUIRES a QEMU carrying the precise-state patch to i386_tr_insn_start()
+ * (target/i386/tcg/translate.c): when a plugin is loaded, EIP and cc_op are
+ * materialized into env at every instruction boundary.
  *
- * This is a more fundamental requirement than it was in the old design, and
- * survives even though this plugin itself never touches eflags: x86 TCG
- * tracks condition codes (ZF/CF/SF/OF/PF/AF) lazily via cc_op/cc_src/cc_dst,
- * which the translator treats as *symbolic* state within a translation
- * block -- real stores to env->cc_op/cc_src/cc_dst only happen at specific
- * sync points, generally a TB's own natural end, not after every
- * instruction inside a multi-instruction TB. Our trampoline's own `pushfq`
- * (real hardware, always correct *once it runs*) is executed as the first
- * instruction of a freshly-jumped-to translation block reached via a hard
- * cpu_loop_exit -- and if the instruction whose flags it wants to capture
- * was itself mid-TB rather than at a TB boundary, cc_op may not have been
- * spilled to env yet, so pushfq observes stale state. Forcing one
- * instruction per TB guarantees the spill happens after every single
- * instruction, which is exactly the granularity pstepper needs to trap on
- * anyway, so the added TB-exit overhead is immaterial. Confirmed empirically
- * against a floating-point loop: without this flag a conditional branch
- * dependent on a `cmp` two instructions prior read the wrong flags and
- * looped forever; with it, the same run matches a native (non-QEMU) result
- * bit-for-bit.
+ * This used to be `-one-insn-per-tb` on the command line instead, which
+ * bought the same guarantee by brute force. x86 TCG tracks condition codes
+ * (ZF/CF/SF/OF/PF/AF) lazily via cc_op/cc_src/cc_dst, which the translator
+ * treats as *symbolic* state within a translation block -- real stores to
+ * env->cc_op only happen where the translator has a reason to emit one, not
+ * after every instruction of a multi-instruction TB. cc_src/cc_dst, by
+ * contrast, are written eagerly. So an upcall taken mid-TB left env holding
+ * fresh cc_src/cc_dst against a cc_op belonging to some earlier instruction,
+ * and our trampoline's `pushfq` -- real hardware, always right *once it
+ * runs*, but running in a freshly-jumped-to block after a hard
+ * cpu_loop_exit -- captured garbage. Observed as a conditional branch
+ * dependent on a `cmp` two instructions prior looping forever.
+ *
+ * Forcing one instruction per TB fixed that and cost two orders of
+ * magnitude: it applies to *all* guest code, including the upcall handler,
+ * which for a consumer like backtrace-comparer outnumbers the code being
+ * observed by ~10^4:1. With the state synced at each instruction boundary
+ * instead, the flag is unnecessary and the trampoline and handler run as
+ * ordinary chained, multi-instruction TBs.
+ *
+ * The second half of that cost was the per-instruction callback itself,
+ * which fired for every instruction of the trampoline and handler only to be
+ * dropped by the in_trap check. That is now a scoreboard-gated conditional
+ * callback -- see GATE_* below -- so while a trap is parked QEMU evaluates a
+ * load/compare inline and calls nothing.
  *
  * ---------------------------------------------------------------------------
  * aarch64 LL/SC: x86 atomics are a single `lock` instruction, but aarch64
@@ -227,6 +235,55 @@ typedef struct {
 #define MAX_VCPUS 256
 static VcpuState g_vcpus[MAX_VCPUS];
 
+/*
+ * The upcall gate: one per-vCPU scoreboard word, compared inline by QEMU
+ * against each instruction's registered immediate, so that instructions
+ * which would only be dropped again never reach a callback at all.
+ *
+ * Every ordinary instruction registers with immediate GATE_ARMED, the resume
+ * marker with GATE_PARKED, and the condition is `gate >= imm`:
+ *
+ *   GATE_OFF     nothing is delivered  (stepping disabled)
+ *   GATE_PARKED  only the resume marker is delivered (trampoline, handler,
+ *                a clone bootstrap, or a guest signal handler QEMU
+ *                interposed while the trap was in flight -- all the code
+ *                the in_trap check used to drop one callback at a time)
+ *   GATE_ARMED   everything is delivered
+ *
+ * in_trap survives alongside this: the gate says what QEMU should bother
+ * calling us for, in_trap is what case (2) below reads to decide that a
+ * stepped guest instruction is genuinely retiring. They are not the same
+ * predicate -- the gate is already back to GATE_ARMED at the resume marker,
+ * while in_trap stays set until the trapped instruction actually runs.
+ */
+enum {
+	GATE_OFF = 0,
+	GATE_PARKED = 1,
+	GATE_ARMED = 2,
+};
+
+static struct qemu_plugin_scoreboard *g_gate_score;
+static qemu_plugin_u64 g_gate;
+
+/*
+ * The resume marker's address, needed at *translation* time to give that one
+ * instruction the lower gate immediate. Per-vCPU state can't serve: a TB is
+ * translated once and shared. All threads run the same trampoline, so one
+ * global is right; CMD_ENABLE rejects a second, different value.
+ *
+ * This is only correct because the trampoline cannot have been translated
+ * before the first CMD_ENABLE -- nothing branches to it until a trap does.
+ * If that ever stopped holding, the marker would be registered as an
+ * ordinary instruction, never intercepted while parked, and the guest would
+ * execute the bare ud2/brk: a loud SIGILL, not a silent wedge.
+ */
+static uint64_t g_resume_marker_pc;
+
+static void set_gate(unsigned int vcpu_index, uint64_t value)
+{
+	qemu_plugin_u64_set(g_gate, vcpu_index, value);
+}
+
 static VcpuState *state_for(unsigned int vcpu_index)
 {
 	g_assert(vcpu_index < MAX_VCPUS);
@@ -333,6 +390,7 @@ static void do_insn_exec(unsigned int vcpu_index, uint64_t vaddr, InsnKind kind)
 		st->resume_pc = read_mem64(sp);
 		st->resume_sp = read_mem64(sp + 8);
 		st->in_trap = true;
+		set_gate(vcpu_index, GATE_ARMED);
 		write_reg64(st->reg_sp, st->resume_sp);
 		qemu_plugin_set_pc(st->resume_pc); /* noreturn */
 		g_assert_not_reached();
@@ -412,6 +470,7 @@ static void do_insn_exec(unsigned int vcpu_index, uint64_t vaddr, InsnKind kind)
 	write_mem64(slot + 8, sp);
 	st->in_trap = true;
 	st->resume_pc = 0;
+	set_gate(vcpu_index, GATE_PARKED);
 	write_reg64(st->reg_sp, slot);
 	qemu_plugin_set_pc(st->trampoline_pc); /* noreturn */
 	g_assert_not_reached();
@@ -443,24 +502,6 @@ static void vcpu_insn_exec_clrex(unsigned int vcpu_index, void *userdata)
 static void vcpu_tb_trans(struct qemu_plugin_tb *tb, void *userdata)
 {
 	size_t n = qemu_plugin_tb_n_insns(tb);
-
-	/*
-	 * -one-insn-per-tb is a hard requirement (see the file header comment),
-	 * but it can't be checked in qemu_plugin_install(): qemu_info_t doesn't
-	 * expose it, and install()'s argv is only this plugin's own `-plugin
-	 * file.so,...` arguments, not QEMU's global command line. Detect it
-	 * empirically instead: under -one-insn-per-tb, literally every
-	 * translation block contains exactly one instruction, so any TB with
-	 * more than one proves the flag is missing. Real guest startup code
-	 * guarantees we see one almost immediately, well before the guest ever
-	 * gets to call pstepper_enable().
-	 */
-	if (n > 1) {
-		die("saw a translation block with %zu instructions; pstepper "
-		    "requires the guest qemu to be run with -one-insn-per-tb "
-		    "(see the header comment in this file for why)",
-		    n);
-	}
 
 	for (size_t i = 0; i < n; i++) {
 		struct qemu_plugin_insn *insn = qemu_plugin_tb_get_insn(tb, i);
@@ -497,7 +538,12 @@ static void vcpu_tb_trans(struct qemu_plugin_tb *tb, void *userdata)
 			}
 		}
 
-		qemu_plugin_register_vcpu_insn_exec_cb(insn, cb, QEMU_PLUGIN_CB_RW_REGS_PC, (void *)vaddr);
+		/* See GATE_* above: the resume marker has to be delivered while
+		 * a trap is parked, everything else only while armed. */
+		uint64_t gate_min = (g_resume_marker_pc != 0 && vaddr == g_resume_marker_pc) ? GATE_PARKED : GATE_ARMED;
+
+		qemu_plugin_register_vcpu_insn_exec_cond_cb(insn, cb, QEMU_PLUGIN_CB_RW_REGS_PC, QEMU_PLUGIN_COND_GE,
+							   g_gate, gate_min, (void *)vaddr);
 	}
 }
 
@@ -522,6 +568,13 @@ static bool vcpu_syscall_filter(unsigned int vcpu_index, int64_t num, uint64_t a
 			die("vcpu%u: upcall stack top 0x%" PRIx64 " is not %" PRIu64 "-byte aligned", vcpu_index,
 			    a3, align_mask + 1);
 		}
+		if (g_resume_marker_pc == 0) {
+			g_resume_marker_pc = a5;
+		} else if (g_resume_marker_pc != a5) {
+			die("vcpu%u: resume marker moved from 0x%" PRIx64 " to 0x%" PRIx64
+			    "; it is baked into translated code and must be process-wide",
+			    vcpu_index, g_resume_marker_pc, a5);
+		}
 		st->reg_sp = find_reg((g_target == TARGET_X86_64) ? "rsp" : "sp");
 		st->trampoline_pc = a2;
 		st->upcall_stack_top = a3;
@@ -532,6 +585,9 @@ static bool vcpu_syscall_filter(unsigned int vcpu_index, int64_t num, uint64_t a
 		st->resume_sp = 0;
 		st->mon_armed = false;
 		st->excl_pc = 0;
+		/* A thread the clone hook bootstraps arms itself while already
+		 * running on its upcall stack, i.e. already parked. */
+		set_gate(vcpu_index, (a4 != 0) ? GATE_PARKED : GATE_ARMED);
 		fprintf(stderr,
 			"[pstepper] vcpu%u: stepping enabled, trampoline=0x%" PRIx64 " upcall_stack_top=0x%" PRIx64
 			" resuming=%" PRIu64 " resume_marker=0x%" PRIx64 "\n",
@@ -547,6 +603,7 @@ static bool vcpu_syscall_filter(unsigned int vcpu_index, int64_t num, uint64_t a
 		st->resume_sp = 0;
 		st->mon_armed = false;
 		st->excl_pc = 0;
+		set_gate(vcpu_index, GATE_OFF);
 		fprintf(stderr, "[pstepper] vcpu%u: stepping disabled\n", vcpu_index);
 		*sysret = 0;
 		return true;
@@ -577,6 +634,9 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
 	} else {
 		die("unsupported guest target '%s' (supports x86_64, aarch64)", info->target_name);
 	}
+
+	g_gate_score = qemu_plugin_scoreboard_new(sizeof(uint64_t));
+	g_gate = qemu_plugin_scoreboard_u64(g_gate_score);
 
 	qemu_plugin_register_vcpu_syscall_filter_cb(id, vcpu_syscall_filter, NULL);
 	qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans, NULL);

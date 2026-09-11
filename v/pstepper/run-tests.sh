@@ -38,7 +38,7 @@ for t in $tests; do
     i=1
     while [ "$i" -le "$runs" ]; do
         printf '=== %s (%d/%d) ===\n' "$t" "$i" "$runs"
-        if ! "$qemu" -one-insn-per-tb -plugin "$plugin" "./$t"; then
+        if ! "$qemu" -plugin "$plugin" "./$t"; then
             fail=1
             break
         fi
