@@ -45,6 +45,7 @@ typedef struct pstepper_gpregs {
 	uint64_t rip;
 } pstepper_gpregs_t;
 
+#ifndef __cplusplus
 /*
  * gregset_t is greg_t[__NGREG]; each pstepper_gpregs_t field must sit at the
  * byte offset its REG_* index would land at in that array, so a fake
@@ -77,5 +78,6 @@ PSTEPPER_ASSERT_GREG(rip, REG_RIP);
  * with no gaps -- so the struct is exactly a prefix of gregset_t. */
 _Static_assert(sizeof(pstepper_gpregs_t) == (REG_RIP + 1) * sizeof(greg_t),
 	       "pstepper_gpregs_t is not a gap-free prefix of gregset_t");
+#endif // !__cplusplus
 
 #endif /* PSTEPPER_AMD64_H_ */

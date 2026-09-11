@@ -62,9 +62,6 @@
  * target-gated machinery below). */
 #include "pstepper_abi.h"
 
-// Makes PSTEPPER_SYSCALL_NR syscall
-uint64_t pstepper_syscall(uint64_t cmd, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4);
-
 /*
  * Arch-specific slice of the ABI: pstepper_gpregs_t, the register snapshot
  * handed to the handler. Picked here so the rest of this header (the handler
@@ -79,6 +76,13 @@ uint64_t pstepper_syscall(uint64_t cmd, uint64_t arg1, uint64_t arg2, uint64_t a
 #else
 #error "pstepper: no register-snapshot definition for this architecture yet"
 #endif
+
+#if defined(__cplusplus)
+extern "C" {
+#endif
+
+// Makes PSTEPPER_SYSCALL_NR syscall
+uint64_t pstepper_syscall(uint64_t cmd, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4);
 
 /*
  * The registered upcall handler. Deliberately shaped like a POSIX
@@ -128,5 +132,9 @@ void pstepper_invoke_handler(pstepper_gpregs_t *regs);
  */
 int pstepper_enable(pstepper_handler_fn handler, uint64_t upcall_stack_size);
 void pstepper_disable(void);
+
+#if defined(__cplusplus)
+}  // extern "C"
+#endif
 
 #endif /* PSTEPPER_H_ */
