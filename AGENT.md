@@ -26,9 +26,11 @@ The contract:
   guess.
 * Modern Linux, glibc 2.35+ (`_dl_find_object`). x86-64 is where the testing
   is; aarch64 builds, passes the basic tests, and has both its own
-  `GuessUnwindInfo` (§4.9) and the fast path (§4.8) — but still no comparer,
-  so the differential sweep (§4.10) is its main oracle. riscv and 32-bit
-  eventually.
+  `GuessUnwindInfo` (§4.9) and the fast path (§4.8). The comparer's
+  machine-dependent half is split out behind `ComparerArch` (§4.6) and an
+  aarch64 implementation of it exists, but nothing has run it yet — so the
+  differential sweep (§4.10) is still aarch64's only working oracle. riscv
+  and 32-bit eventually.
 
 ## 2. Build and test
 
@@ -96,10 +98,17 @@ edit). **Edit `genbuild.rb`, never `build.ninja`.**
 ./genbuild.rb ninja CC=clang CXX=clang++     # ENV overrides; re-execs itself
 ```
 
-Defaults are `-ggdb3 -O2 -DNDEBUG -Wall -Wextra -march=native`, i.e. an NDEBUG,
-machine-specific build — don't copy the `.so` to another machine, it will
-`SIGILL`. Five artifacts, none of which Bazel builds: `backtrace-comparer.so`,
-`sym_helper_bin`, `test-signal-disable`, and `cjm`/`cjm0`.
+Defaults are `-ggdb3 -O2 -DNDEBUG -Wall -Wextra`, plus `-march=haswell` on
+x86-64 (`ARCH` comes from `$CXX -dumpmachine`; aarch64 gets no `-march`). So an
+NDEBUG build that assumes at least Haswell — don't copy the `.so` to an older
+x86 machine, it will `SIGILL`. Four artifacts, none of which Bazel builds:
+`backtrace-comparer.so`, `sym_helper_bin`, and `cjm`/`cjm0`.
+
+`ARCH` also picks which `v/pstepper` slice is compiled, so the model is
+cross-capable, but the `sym_helper` blob is still objcopied with the *host*
+`objdump`/`objcopy` (`BFD_ARCH`) — a cross build therefore links an
+x86 blob into an aarch64 `.so` and fails. Native builds on either arch are
+fine.
 
 ### Two things about test configurations
 
@@ -108,9 +117,15 @@ capture with `trap_diagnostics`, so a diagnostic aborts where it happened; `#if
 defined(NDEBUG) || defined(BUILD_SO)` opts out, so the preloadable `.so` never
 traps — it walks startup and libc code nobody will fix.
 
-**A comparer mismatch is a test failure.** `aw-backtrace-test` sets
-`AW_BT_DIAG=0` and `AW_BT_DIAG_VIA_CORE=1` (with `overwrite=0`, so your values
-win) so the first mismatch kills the process, in `-c opt` too. Knobs in §5.
+**A comparer mismatch is a test failure — but only under qemu.** The comparer
+rides `v/pstepper` now, so a plain `bazel test` gets `pstepper_enable FAILED:
+Function not implemented`, passes, and compares nothing at all; nothing in
+`BUILD.bazel` or `test-all-cfg.rb` runs a test under qemu with the plugin, so
+that is every run of the default suite. §5 has the invocation that actually
+steps. When it *does* run, `aw-backtrace-test` sets `AW_BT_DIAG=0` (with
+`overwrite=0`, so your value wins) so the first unsuppressed diagnostic raises
+`SIGTRAP` and kills the process, in `-c opt` too. It also still sets
+`AW_BT_DIAG_VIA_CORE=1`, which nothing reads any more. Knobs in §5.
 Cache counters only exist when `AW_BUMP_STATS_IN_PRODUCTION` is defined —
 `genbuild.rb` defines it, Bazel does not.
 
@@ -141,20 +156,25 @@ Cache counters only exist when `AW_BUMP_STATS_IN_PRODUCTION` is defined —
 ### Test / tooling
 
 * **`backtrace-comparer.cc` — the best test asset in the repo.**
-  Single-steps the whole process via `mini-x86-int`'s sim-stepper,
-  maintains a shadow call stack from `call`/`ret`, and compares the
-  capture against it *at every instruction*. Needs no expected
-  values. Known-bogus spots (`_dl_fixup`, `call_init`,
-  `__run_exit_handlers`) are suppressed by symbolizing the top frames;
-  matches are cached, and an unsuppressed mismatch registers its own
-  top frame so each location reports once. §4.6 before trusting a
-  quiet run. Uses x86 TF flag and SIGTRAP so "hostile" to GDB-ing.
+  Single-steps the whole process via `v/pstepper`, maintains a shadow
+  call stack from calls and returns, and compares the capture against
+  it *at every instruction*. Needs no expected values. Known-bogus
+  spots (`_dl_fixup`, `call_init`, `__run_exit_handlers`) are
+  suppressed by symbolizing the top frames; matches are cached, and an
+  unsuppressed mismatch registers its own top frame so each location
+  reports once. §4.6 before trusting a quiet run. The file itself is
+  arch-neutral: per-thread state lives in one `ThreadState`, and
+  everything machine-dependent is behind `ComparerArch`.
+* `comparer-arch.h`, `comparer-arch-x86_64.h`, `comparer-arch-aarch64.h` —
+  that seam: a per-arch `struct ComparerArch` with a fixed static interface,
+  same shape as the unwinder's `struct Arch` and deliberately sharing no code
+  with it (§4.6).
 * **`backtrace-comparer.so`** (`-DBUILD_SO`, ninja only) — the same
   thing as an LD_PRELOAD object, which is what points the differential
   machine at arbitrary already-built binaries. Interposes
-  `sigaltstack`/`sigaction` so the target can't disable the stepper,
-  `unsetenv`s `LD_PRELOAD` so it doesn't follow into children, exports
-  almost nothing (version script). Usage in §5.
+  `sigaction` so the target can't take over the signals the comparer
+  itself answers on, `unsetenv`s `LD_PRELOAD` so it doesn't follow into
+  children, exports almost nothing (version script). Usage in §5.
 * `aw-backtrace-test.cc` — main end-to-end test. Captures from a
   SIGILL handler (so the top frame is a real signal frame with a
   `ucontext`) and checks that walking *through* the signal frame
@@ -212,11 +232,20 @@ Cache counters only exist when `AW_BUMP_STATS_IN_PRODUCTION` is defined —
   process image as a daemon that keeps an `addr2line` per binary and answers
   requests over a socketpair. **Diagnostics and tests only, never the capture
   path.** The spawn and the protocol are §4.5.
-* `v/mini-x86-int/` — co-developed sibling: partial x86-64 interpreter +
-  `sim_stepper` providing the per-instruction callback the comparer rides on.
-  **No `ptrace` anywhere in it** — stepping is `EFLAGS.TF` plus an `SA_ONSTACK`
-  `SIGTRAP` handler, i.e. the process steps itself, and the interpreter is a
-  fast path that simulates runs of instructions to avoid a trap each. §4.7.
+* `v/pstepper/` — co-developed sibling, and what the comparer rides on now: a
+  per-instruction upcall facility shaped like an imagined kernel feature
+  (a "UXI" delivered on a dedicated upcall stack), faked underneath by a QEMU
+  TCG plugin. The comparer is written against `pstepper.h` alone and knows
+  nothing about QEMU; `pstepper_enable` returns `ENOSYS` when no plugin is
+  loaded. Its own `README.md` has the four-layer design. The "acceleration"
+  hack runs the handler as *host* code when guest and host arch match, which
+  is why a `raise()` from a diagnostic behaves differently with it on (§5).
+* `v/mini-x86-int/` — the previous, x86-only stepper: partial x86-64
+  interpreter + `sim_stepper`. **No `ptrace` anywhere in it** — stepping is
+  `EFLAGS.TF` plus an `SA_ONSTACK` `SIGTRAP` handler, i.e. the process steps
+  itself, and the interpreter is a fast path that simulates runs of
+  instructions to avoid a trap each. §4.7. Nothing in the comparer or in
+  `genbuild.rb` uses it any more; its own Bazel tests still run.
 
 ### Fuzzing and offline tooling
 
@@ -501,7 +530,31 @@ that lacked `CLOEXEC` would otherwise stay open with it — and if that is a
 pipe's write end, the host's reader never sees EOF and a make or shell pipeline
 hangs.
 
-### 4.6 The comparer's shadow stack
+### 4.6 The comparer's shadow stack, and its arch seam
+
+**Everything machine-dependent is behind `ComparerArch`** (`comparer-arch.h`
+and its two per-arch headers), and there are exactly two things in it:
+recognizing the instruction at the trapped pc as a call or a return and saying
+what a retired call put where, and recognizing a signal delivery in the frame
+the kernel built. The rest of `backtrace-comparer.cc` — the shadow stack, the
+resync rule, the suppression cache, the comparison — is arch-neutral, and the
+one piece of per-thread state is `ThreadState`.
+
+**It deliberately shares no code with the unwinder's `struct Arch`.** The
+comparer is an independent oracle: if it borrowed the unwinder's idea of what
+a signal frame looks like, a wrong answer in `Arch::IsSignalFrame` would agree
+with itself and the test would pass.
+
+**On aarch64 the model is identical and the reason is different.** An entry
+retires at `sp + 8` on x86-64 because `call` pushed the return address and
+`ret` pops it; on aarch64 `bl` writes x30 and touches no stack, so a callee is
+entered with the *caller's* sp and a well-behaved `ret` is reached with that
+same sp — an entry retires at exactly the sp the call was made with. The
+corollary is the same trap §4.9 describes for `GuessUnwindInfo`: `*sp` at a
+callee's entry belongs to the caller and very often holds the caller's own
+spilled x30, so x86-64's "the word at `*sp` is the return address" must not be
+ported. The aarch64 signal frame has no `pretcode` either — the trampoline's
+address arrives in x30, so the handler's own `ret` is what reaches it.
 
 Before touching `BacktraceBuffer`:
 
@@ -518,13 +571,30 @@ Before touching `BacktraceBuffer`:
   against the top of the *shadow stack* as well as the capture, so a
   once-reported pc that later appears as a return address silently skips that
   comparison too; and it saturates at 256 entries (saying so once).
-* **Windows where `SIGTRAP` is blocked are forgiven.** The stepper sees nothing
-  while the target has it masked, so the comparer recognizes the *disable*
-  syscall and resynchronizes from empty on the next callback — by definition
-  already past the re-enable. That check must sit **first** in the
-  sigtrap-disable/call/ret chain.
+* **Signal delivery is modelled explicitly**, because it is the one control
+  transfer that inserts frames without a `call`: the kernel builds an
+  `rt_sigframe` and jumps at the handler. `TryRecognizeSignalEntry` spots that
+  frame at the new sp — no trampoline byte matching and nothing borrowed from
+  the unwinder, so the comparer stays an independent oracle for
+  `Arch::IsSignalFrame` — and pushes the two entries it accounts for, the
+  interrupted pc and the trampoline return address. `rt_sigreturn` is then just
+  a `ret`, and so is the handler's own. The interrupted entry keeps a pointer to
+  its `rt_sigframe` and re-reads the pc from it at every comparison, since a
+  handler may edit the context it resumes through (`aw-backtrace-test`'s does).
+  Note a pending call or return ought to be resolved against the *interrupted*
+  register file, not the current one — `SignalDelivery` carries it and
+  `EntryForRetiredCall` takes the pair for exactly that, but
+  `ResolvePendingTransfer` still uses the live one, since the case has never
+  been caught happening and guessing wrong corrupts the shadow stack for good.
+  None of this was reachable from the old hardware-TF stepper, which never got
+  a callback inside a handler (§4.7) — so that stepper never actually compared
+  the SIGILL capture `aw-backtrace-test` exists to produce; `v/pstepper` does.
 
-### 4.7 Why the stepper redirects syscalls through a trampoline
+### 4.7 Why the *old* stepper redirects syscalls through a trampoline
+
+This is `v/mini-x86-int`, which the comparer no longer uses — kept because the
+hole it describes is what motivated moving to `v/pstepper`, and because the
+sibling still has to work.
 
 `EFLAGS.TF` stepping **cannot observe the instruction after a `syscall`**:
 `SYSCALL` clears `TF` in hardware, the kernel leaves via `IRET`, and `IRET`
@@ -645,7 +715,11 @@ per-frame two only under `AW_BUMP_STATS_IN_PRODUCTION`, like the cache's own).
 and `StepperCallback` requires an exact match against the normal capture before
 it even consults the shadow stack — so a fast-path or cache bug is a test
 failure with `--fast:` / `--ref:` dumps, independent of the shadow-stack
-machinery.
+machinery. It is on by default and doubles the cost of a step, which is the
+only reason `AW_BT_CROSS_CHECK=0` (§5) exists. One caveat on "independent":
+`StepperCallback` returns early while a shadow-stack suppression is active, and
+that early return sits *above* the cross-check, so a suppression switches this
+off too until the frame it was set on is popped.
 
 ### 4.9 The aarch64 guess
 
@@ -751,32 +825,49 @@ should the outcome ever be routed back through `kOk`.
   compiler/linker-version fragile by nature.
 * History was squashed at the first public release, so there is no pre-release
   archaeology to do. Infer intent from `TODO`, `README.md` and this file.
-* **Debugging.** `aw-backtrace-test` and `lua-test` start the single-stepping
-  comparer, which fights gdb. Use `aw-backtrace-test --nocompare`,
-  `amd64-leaf-test` / `arm64-leaf-test` (never start it), or `cjm0`. `AW_BT_BREAK_AT=0x<addr>` (or
-  `0x<addr>:<skips>`) stops the stepper there, prints the pid and `SIGSTOP`s so
-  you can attach; `kill -CONT` resumes.
-* **Comparer mismatch knobs**, both read once at start: `AW_BT_DIAG=N` means
-  "act on the (N+1)-th unsuppressed mismatch" (default: print and keep going),
-  and `AW_BT_DIAG_VIA_CORE` picks *how* to act — `ud2` for a core dump instead
-  of the soft breakpoint.
+* **Debugging.** Run natively, nothing steps at all — `pstepper_enable` fails
+  with `ENOSYS`, so every test is gdb-friendly, and `aw-backtrace-test`,
+  `amd64-leaf-test` / `arm64-leaf-test` and `cjm0` are all fair game.
+  `aw-backtrace-test --nocompare` skips starting it at all. Under qemu it is
+  the comparer that fights gdb, and with acceleration on the handler
+  runs as *host* code, so attach to qemu rather than to the guest — that is
+  what `diag_all_text_sections` is for, as `add-symbol-file` arguments.
+  `AW_BT_BREAK_AT=0x<addr>` (or `0x<addr>:<skips>`) no longer stops anything by
+  itself: it runs a lone `nop` in `StepperCallback` when the stepped pc matches,
+  for you to put a gdb breakpoint on, and it turns acceleration off so that
+  breakpoint is in the process you are debugging rather than in qemu.
+* **Comparer knobs, all read once in `StartBacktraceComparer`**:
+  `AW_BT_DIAG=N` means "act on the (N+1)-th unsuppressed diagnostic", where
+  acting is `raise(SIGTRAP)` — for a debugger to catch, or for the default
+  action to kill the process. The default is to report and keep going.
+  `AW_BT_CROSS_CHECK=0` turns off the per-step fast-path/cache cross-check
+  (§4.8), which is the only thing that doubles the cost of every step.
+  `AW_BT_ACCEL=0`/`1` forces pstepper's acceleration off or on; setting
+  `AW_BT_DIAG` or `AW_BT_BREAK_AT` turns it off by default, because with it on
+  the handler runs as host code and a `raise` from there lands in qemu rather
+  than in the target. There is no `AW_BT_DIAG_VIA_CORE` any more — a
+  `SIGTRAP` nobody catches dumps core on its own.
 * **Comparer diagnostics never go through stdio** — they are `write(2)`s to a
   private dup of stderr taken at startup and moved to fd 900+, because the
-  comparer prints from inside the SIGTRAP handler and because the target may
+  comparer prints from inside the stepper callback and because the target may
   have closed or redirected 0/1/2. `AW_BT_DIAG_FILE=<path>` redirects them. Use
   `DiagPrintf`/`DiagWrite`, never `printf`/`fprintf`, anywhere in that file.
 * **Running the comparer against an arbitrary binary:**
 
   ```
-  LD_PRELOAD=./backtrace-comparer.so some-program args...
+  qemu-x86_64 -plugin v/pstepper/pstepper_plugin.so \
+      -E LD_PRELOAD=./backtrace-comparer.so some-program args...
   kill -USR1 <pid>   # cache stats + instructions stepped
   kill -USR2 <pid>   # dump the next captured backtrace
   ```
 
-  Everything is single-stepped, so expect it to be *very* slow.
-  `AW_BT_DONT_DROP_PRELOAD=1` keeps the preload for children (usually you want
-  it off). The opening `allowing sigaltstack for 262144 …` line is the stepper
-  installing its own stack, not a warning.
+  **`-E` is load-bearing.** A bare `LD_PRELOAD=… qemu-x86_64 …` preloads the
+  comparer into *qemu itself*, where it prints a plausible-looking banner and
+  then `pstepper_enable FAILED: Function not implemented` — the guest never
+  sees the preload at all, because the constructor `unsetenv`s it. `-E` sets
+  the guest's environment instead. Everything is single-stepped, so expect it
+  to be *very* slow. `AW_BT_DONT_DROP_PRELOAD=1` keeps the preload for children
+  (usually you want it off).
 
   **Expect zero mismatches** on a small dynamically linked program — `/bin/true
   hello` and friends print three `added cached suppression` lines and nothing
@@ -801,10 +892,17 @@ is down to two warnings, both `-Wsign-conversion` in `aw-addrcheck.c`. Everythin
 
 True of the tree but not in `TODO`:
 
-* **aarch64 builds and passes the tests, but is not release-ready** — still no
-  comparer (the sim-stepper is x86-only, and `PSTATE.SS` is EL1-only, so the
-  self-stepping trick cannot be ported; a comparer here needs `ptrace` or an
-  instrumentation-based shadow stack), and no CI. What it does have now:
+* **aarch64 builds and passes the tests, but is not release-ready** — the
+  comparer has never run there, and no CI. The old blocker is gone: the
+  sim-stepper was x86-only and `PSTATE.SS` is EL1-only, so the self-stepping
+  trick could not be ported, but `v/pstepper` steps from outside the guest and
+  has an arm64 port. What is left is wiring, not design — `ComparerArch`
+  (§4.6) has an aarch64 implementation that compiles and is otherwise
+  completely unexercised, `genbuild.rb` has no cross-compile support, and
+  `BUILD.bazel` still gates `:pstepper_plumbing` and `MAYBE_COMPARER` to
+  x86-64. Flipping those is the next step, and until something has actually
+  run, treat the aarch64 `ComparerArch` as a starting point rather than as
+  working code. What aarch64 does have now:
   `GuessUnwindInfo` (§4.9) with `arm64-leaf-test.cc` behind it, the fast path
   (§4.8), and the differential sweep (§4.10) holding the latter honest at
   ~43k probes and ~99% coverage in a gcc build (60% under clang, by design —
@@ -821,9 +919,9 @@ True of the tree but not in `TODO`:
   machinery at all, and is what should decide whether the residual cases in
   §4.9 are worth more code.
 * **The comparer's own machinery is the fastest-moving code in the tree and
-  almost none of it is under test.** `BacktraceBuffer`, the truncation rule, the
-  SIGTRAP resynchronization and the two libc interposers are validated only by
-  "the tests still pass" and by eyeballing a preload run. Empirically not
+  almost none of it is under test.** `BacktraceBuffer`, the truncation rule,
+  the return resynchronization and the `sigaction` interposer are validated
+  only by "the tests still pass" and by eyeballing a preload run. Empirically not
   enough: three out-of-bounds reads plus both §4.5 descriptor bugs were
   unreachable from anything the tests assert on, and the descriptor ones each
   took a hand-run preload to find. `BacktraceBuffer` is the easy win — it needs

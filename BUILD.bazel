@@ -89,21 +89,57 @@ cc_library(
 
 cc_library(
     name = "backtrace-comparer",
-    srcs = select({
-        "@platforms//cpu:x86_64": ["backtrace-comparer.cc"],
-        "//conditions:default": [],
-    }),
+    srcs = ["backtrace-comparer.cc"],
     hdrs = ["backtrace-comparer.h"],
     cxxopts = CXXOPTS,
-    deps = [":headers"] + select({
+    deps = [
+        ":aw-backtrace",
+        ":headers",
+        ":pstepper_plumbing",
+        ":symbolize-backtrace",
+    ],
+)
+
+cc_library(
+    name = "nop-backtrace-comparer",
+    srcs = ["nop-backtrace-comparer.c"],
+    deps = [":headers"],
+)
+
+cc_library(
+    name = "pstepper_plumbing",
+    srcs = [
+        "v/pstepper/pstepper.c",
+        "v/pstepper/pstepper.h",
+        "v/pstepper/pstepper_abi.h",
+        "v/pstepper/pstepper_internal.h",
+    ] + select({
         "@platforms//cpu:x86_64": [
-            ":aw-backtrace",
-            ":symbolize-backtrace",
-            "//v/mini-x86-int:sim_stepper",
+            "v/pstepper/pstepper_amd64.c",
+            "v/pstepper/pstepper_amd64.h",
+            "v/pstepper/pstepper_frame_amd64.h",
+            "v/pstepper/pstepper_trampoline_amd64.S",
         ],
-        "//conditions:default": [],
+        "@platforms//cpu:aarch64": [
+            "v/pstepper/pstepper_arm64.c",
+            "v/pstepper/pstepper_arm64.h",
+            "v/pstepper/pstepper_frame_arm64.h",
+            "v/pstepper/pstepper_trampoline_arm64.S",
+        ],
+    }),
+    defines = ["_GNU_SOURCE"],
+    target_compatible_with = ["@platforms//os:linux"] + select({
+        "@platforms//cpu:x86_64": [],
+        "@platforms//cpu:aarch64": [],
+        "//conditions:default": ["@platforms//:incompatible"],
     }),
 )
+
+COMPARER = select({
+    "@platforms//cpu:x86_64": [":backtrace-comparer"],
+    "@platforms//cpu:aarch64": [":backtrace-comparer"],
+    "//conditions:default": [":nop-backtrace-comparer"]
+    })
 
 cc_library(
     name = "simple-fp-backtrace",
@@ -115,7 +151,10 @@ cc_library(
 
 cc_binary(
     name = "sym-helper",
-    srcs = ["sym-helper.cc", "sym-helper-protocol.h"],
+    srcs = [
+        "sym-helper.cc",
+        "sym-helper-protocol.h",
+    ],
     cxxopts = CXXOPTS,
 )
 
@@ -169,13 +208,9 @@ cc_test(
     linkstatic = True,
     deps = [
         ":aw-backtrace",
-        ":backtrace-comparer",
         ":headers",
         ":symbolize-backtrace",
-    ] + select({
-        "@platforms//cpu:x86_64": ["//v/mini-x86-int:sim_stepper"],
-        "//conditions:default": [],
-    }),
+    ] + COMPARER,
 )
 
 cc_test(
@@ -234,9 +269,8 @@ cc_test(
     linkstatic = True,
     deps = [
         ":aw-backtrace",
-        ":backtrace-comparer",
         "@lua",
-    ],
+    ] + COMPARER,
 )
 
 cc_test(
