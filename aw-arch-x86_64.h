@@ -118,10 +118,6 @@ struct Arch {
     if (!(pc_bounds.first <= pc && pc < pc_bounds.second)) {
       return false;
     }
-    uintptr_t code_size = pc_bounds.second - pc;
-
-    const uint8_t* code = reinterpret_cast<const uint8_t*>(pc);
-
     // Note, pattern 1 is what we currently have. But pattern 2 is
     // more logical equivalent (load into %eax is a little shorter
     // encoding). So we check both.
@@ -132,8 +128,21 @@ struct Arch {
     // Pattern 2: b8 0f 00 00 00; 0f 05 (mov $15, %eax; syscall)
     static constexpr std::array kMovEAX = std::to_array<uint8_t>({0xb8, 0x0f, 0x00, 0x00, 0x00, 0x0f, 0x05});
 
+    auto check_match_at = [&](std::span<const uint8_t> pattern, uintptr_t at) -> bool {
+      if (at < pc_bounds.first || pattern.size() > pc_bounds.second - at) {
+        return false;
+      }
+      return memcmp(pattern.data(), reinterpret_cast<const uint8_t*>(at), pattern.size()) == 0;
+    };
+
     auto check_match = [&](std::span<const uint8_t> pattern) -> bool {
-      return (pattern.size() <= code_size) && (memcmp(pattern.data(), code, pattern.size()) == 0);
+      // Two positions to try. pc at the entry is the frame reached by
+      // unwinding *into* the trampoline: its return address is what the
+      // kernel put in the signal frame. pc at the `syscall` -- the last two
+      // bytes of either pattern -- is what a capture taken *while* the
+      // trampoline runs sees, i.e. a sample landing on that one instruction.
+      // sp is the same for both: the mov does not touch it.
+      return check_match_at(pattern, pc) || check_match_at(pattern, pc - (pattern.size() - 2));
     };
 
     if (!check_match(kMovRAX) && !check_match(kMovEAX)) {
