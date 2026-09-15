@@ -28,7 +28,7 @@
 #include <string.h>
 #include <sys/syscall.h>
 
-#include "pstepper.h"
+#include "pstepper_internal.h"
 
 #define ITERATIONS 40
 #define PST_CLONE_THREAD 0x00010000UL

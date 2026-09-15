@@ -25,8 +25,8 @@
 #include <ucontext.h>
 
 #include "pstepper.h"
-#include "pstepper_frame_arm64.h" /* pstepper_frame_t + its _Static_assert cross-checks */
 #include "pstepper_internal.h"
+#include "pstepper_frame_arm64.h" /* pstepper_frame_t + its _Static_assert cross-checks */
 
 /* CLONE_THREAD from <linux/sched.h> -- hardcoded rather than pulling that
  * header in next to glibc's <sched.h> (a known conflict). Stable kernel ABI. */

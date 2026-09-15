@@ -86,7 +86,7 @@
 
 #include <stddef.h>
 
-#include "pstepper.h"
+#include "pstepper_internal.h"
 
 typedef struct pstepper_frame {
 	pstepper_gpregs_t gpr;

@@ -57,32 +57,10 @@
 #include <ucontext.h>
 #include <unistd.h>
 
-/* The syscall/command wire protocol -- shared verbatim with the plugin,
- * which includes only that header (it needs none of the guest-side,
- * target-gated machinery below). */
-#include "pstepper_abi.h"
-
-/*
- * Arch-specific slice of the ABI: pstepper_gpregs_t, the register snapshot
- * handed to the handler. Picked here so the rest of this header (the handler
- * signature, pstepper_invoke_handler) can be written against the type
- * regardless of target. A new port adds its own pstepper_<arch>.h and another
- * arm below.
- */
-#if defined(__x86_64__)
-#include "pstepper_amd64.h"
-#elif defined(__aarch64__)
-#include "pstepper_arm64.h"
-#else
-#error "pstepper: no register-snapshot definition for this architecture yet"
-#endif
-
 #if defined(__cplusplus)
 extern "C" {
 #endif
 
-// Makes PSTEPPER_SYSCALL_NR syscall
-int pstepper_syscall(uint64_t cmd, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5);
 
 /*
  * The registered upcall handler. Deliberately shaped like a POSIX
@@ -105,23 +83,6 @@ int pstepper_syscall(uint64_t cmd, uint64_t arg1, uint64_t arg2, uint64_t arg3, 
  *                NOT reflected back when the trapped instruction resumes.
  */
 typedef void (*pstepper_handler_fn)(int uxi_kind, void *info, ucontext_t *uc);
-
-/* Defined in pstepper_trampoline_amd64.S. Portable-named on purpose -- these
- * are the symbol contract any arch's trampoline satisfies, so the portable
- * arming code in pstepper.c can reference them directly. */
-extern void pstepper_trampoline(void);
-extern void pstepper_resume_marker(void);
-
-/*
- * Defined in pstepper_amd64.c; called only from pstepper_trampoline_amd64.S
- * once it has built the gpregs snapshot. Always either returns normally (an
- * ordinary step -- the trampoline falls through to its usual
- * restore-and-resume) or diverts internally and never returns at all (e.g.
- * when the trap turns out to be a CLONE_THREAD syscall about to happen,
- * handled entirely on this side before the trampoline ever gets control
- * back).
- */
-void pstepper_invoke_handler(pstepper_gpregs_t *regs);
 
 /*
  * Defined in pstepper.c. pstepper_enable() mmaps its own upcall stack
