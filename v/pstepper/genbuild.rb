@@ -16,9 +16,10 @@
 #                    result caching), print a summary
 # See testrunner.rb for the check machinery.
 #
-# Overridable via the environment (see PRECIOUS_ENVS): CC, CFLAGS, LDFLAGS,
-# LIBS, QEMU_X86_64 / QEMU_AARCH64 (the qemu-<arch> `ninja check` runs tests
-# under -- only the one matching the target arch is consulted).
+# Overridable via the environment (see PRECIOUS_ENVS): CC, CFLAGS,
+# LDFLAGS, LIBS, QEMU (`ninja check` runs tests under qemu. Only the
+# one matching the target arch is consulted). Empty/unset QEMU is
+# treated specially by testrunner.rb. It then takes qemu from PATH.
 
 require 'digest/md5'
 require 'shellwords'
@@ -48,14 +49,6 @@ ARCH = case TARGET_TUPLE
          abort "genbuild.rb: unsupported target #{TARGET_TUPLE.inspect} from " \
                "`#{CC} -dumpmachine` (known: x86_64, aarch64)"
        end
-
-# qemu-<arch> the tests run under (`ninja check`). Baked into build.ninja via
-# the RUN_TEST rule, so pointing at a different binary re-runs every test.
-# Override with QEMU_X86_64=... / QEMU_AARCH64=... -- both are PRECIOUS_ENVs,
-# the script re-execs.
-QEMU_ENV, QEMU_GUEST = { 'amd64' => %w[QEMU_X86_64 x86_64],
-                         'arm64' => %w[QEMU_AARCH64 aarch64] }.fetch(ARCH)
-QEMU = ENV[QEMU_ENV] || "../qemu/build/qemu-#{QEMU_GUEST}"
 
 # -D_GNU_SOURCE: pstepper_<arch>.h (pulled in via pstepper.h) includes
 # <ucontext.h> and _Static_asserts its pstepper_gpregs_t field order against
@@ -113,6 +106,7 @@ def build!(b)
 end
 
 def better_shell_escape(str)
+  return "''" if !str
   return str if Shellwords.split(str) == [str]
   simple = "'#{str}'"
   return simple if Shellwords.split(simple) == [str]
@@ -133,7 +127,7 @@ class NinjaBulder
     def build; program.build; end
   end
 
-  PRECIOUS_ENVS = %w[CC CFLAGS LDFLAGS LIBS QEMU_X86_64 QEMU_AARCH64 NO_GENERATOR]
+  PRECIOUS_ENVS = %w[CC CFLAGS LDFLAGS LIBS QEMU NO_GENERATOR]
 
   OVERRIDES = begin
                 vs = PRECIOUS_ENVS.map { |n| ENV[n] }
@@ -163,7 +157,7 @@ rule LINK_SO
   command = #{CC} -shared -o $out #{LDFLAGS} $in ${link_libs} #{LIBS}
 
 rule RUN_TEST
-  command = ./testrunner.rb run --qemu #{better_shell_escape QEMU} --name $name $in $args
+  command = ./testrunner.rb run --qemu #{better_shell_escape ENV['QEMU']} --arch #{better_shell_escape ARCH} --no-stdout --name $name $in $args
   description = RUN $name
 
 rule AGGREGATE
@@ -243,7 +237,7 @@ HERE
     end
 
     path = File.expand_path("./build.ninja")
-    STDERR.puts "Target: #{ARCH} (#{TARGET_TUPLE}); qemu: #{QEMU}"
+    STDERR.puts "Target: #{ARCH} (#{TARGET_TUPLE})"
     if OVERRIDES.empty?
       STDERR.puts "Wrote #{path}"
     else

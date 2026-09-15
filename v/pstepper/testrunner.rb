@@ -19,8 +19,8 @@
 #     summary, (re)writes test-suite.log, and exits nonzero if any test did
 #     not pass.
 #
-#   subcommands:
-#     testrunner.rb run --qemu Q --name N BINARY [ARGS...]
+#   subcommands: (--qemu is guessed if --arch is given)
+#     testrunner.rb run --qemu Q --arch amd64 --name N BINARY [ARGS...]
 #     testrunner.rb aggregate TRS...
 
 require 'fileutils'
@@ -65,26 +65,43 @@ end
 def cmd_run(argv)
   qemu = nil
   name = nil
+  arch = nil
+  print_stdout = true
   while argv.first&.start_with?('--')
     case argv.shift
     when '--qemu' then qemu = argv.shift
     when '--name' then name = argv.shift
+    when '--arch' then arch = argv.shift
+    when '--no-stdout' then print_stdout = false
     else harness_error("unknown option")
     end
   end
   binary = argv.shift
-  harness_error("run: need --qemu, --name and a binary") unless qemu && name && binary
+  if (!qemu || qemu.empty?) && arch
+    qemu = case arch
+           when 'amd64' then "qemu-x86_64"
+           when 'arm64' then "qemu-aarch64"
+           else
+             harness_error("don't know arch #{arch.inspect}. Note this is go-style: amd64 or arm64")
+           end
+  end
+  harness_error("run: need --qemu or --arch and binary") unless qemu && binary
+  if !name
+    name = File.basename(binary)
+  end
   extra = argv
 
   harness_error("no plugin at #{PLUGIN} (run `ninja` first)") unless File.file?(PLUGIN)
-  unless File.executable?(qemu)
-    harness_error("no qemu-x86_64 at #{qemu} (set QEMU_X86_64, see genbuild.rb)")
-  end
 
   FileUtils.mkdir_p(TESTDIR)
   log = log_path(name)
 
   cmd = [qemu, '-plugin', PLUGIN, "./#{binary}", *extra]
+
+  if arch == "arm64"
+    # qemu emuluates too advanced arm cpu (e.g. uses memcopy instructions)
+    cmd[1,0] = %w[-cpu cortex-a53]
+  end
 
   started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   ok = File.open(log, 'w') do |out|
@@ -97,6 +114,10 @@ def cmd_run(argv)
 
   # system() returns nil if the command could not even be spawned.
   harness_error("could not execute #{qemu}") if ok.nil?
+
+  if print_stdout
+    puts(IO.read(log))
+  end
 
   result = ok ? 'PASS' : 'FAIL'
   write_trs(name, result: result, seconds: seconds,
