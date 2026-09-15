@@ -183,7 +183,7 @@ int main(void)
 	}
 
 	fprintf(stderr, "[guest] arming pstepper\n");
-	pstepper_enable(handler, 1 << 16, 0);
+	pstepper_enable_or_die(handler, 1 << 16, 0);
 
 	int main_bad = run_check("main");
 

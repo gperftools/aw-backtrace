@@ -189,6 +189,16 @@ int pstepper_enable(pstepper_handler_fn handler, uint64_t upcall_stack_size, int
 	return ret;
 }
 
+void pstepper_enable_or_die(pstepper_handler_fn handler, uint64_t upcall_stack_size, int enable_acceleration)
+{
+	int ret = pstepper_enable(handler, upcall_stack_size, enable_acceleration);
+	if (ret != 0) {
+		errno = ret;
+		perror("pstepper_enable");
+		pstepper_die("pstepper-enable failed.");
+	}
+}
+
 void pstepper_disable(void)
 {
 	if (pstepper_syscall(PSTEPPER_CMD_DISABLE, 0, 0, 0, 0, 0) < 0) {

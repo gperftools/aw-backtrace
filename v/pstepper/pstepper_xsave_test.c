@@ -81,7 +81,7 @@ int main(void)
 	}
 
 	fprintf(stderr, "[guest] arming pstepper\n");
-	pstepper_enable(handler, 65536, 0);
+	pstepper_enable_or_die(handler, 65536, 0);
 
 	ymm_roundtrip(in, out);
 

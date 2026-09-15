@@ -92,6 +92,7 @@ typedef void (*pstepper_handler_fn)(int uxi_kind, void *info, ucontext_t *uc);
  * success, and e.g. ENOSYS on failure.
  */
 int pstepper_enable(pstepper_handler_fn handler, uint64_t upcall_stack_size, int enable_acceleration);
+void pstepper_enable_or_die(pstepper_handler_fn handler, uint64_t upcall_stack_size, int enable_acceleration);
 void pstepper_disable(void);
 
 #if defined(__cplusplus)
