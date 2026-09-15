@@ -232,7 +232,7 @@ int main(void)
 	g_main_tid_marker = pthread_self();
 
 	fprintf(stderr, "[guest] arming pstepper\n");
-	pstepper_enable(handler, UPCALL_SIZE);
+	pstepper_enable(handler, UPCALL_SIZE, 1);
 
 	long vm_after_first = -1;
 	long maps_after_first = -1;

@@ -185,7 +185,7 @@ int main(void)
 	double want = reference(n);
 
 	fprintf(stderr, "[guest] arming pstepper\n");
-	pstepper_enable(handler, 65536);
+	pstepper_enable(handler, 65536, 0);
 	double got = compute(n);
 	pstepper_disable();
 

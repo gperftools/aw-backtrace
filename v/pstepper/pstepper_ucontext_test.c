@@ -141,7 +141,7 @@ int main(void)
 	double want = compute(n); /* native reference, before stepping */
 
 	fprintf(stderr, "[guest] arming pstepper\n");
-	pstepper_enable(handler, 65536);
+	pstepper_enable(handler, 65536, 0);
 
 	call_marker_with_sentinels();
 	double got = compute(n);

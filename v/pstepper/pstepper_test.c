@@ -45,7 +45,7 @@ __attribute__((noinline)) static double compute(int n)
 int main(void)
 {
 	fprintf(stderr, "[guest] arming pstepper\n");
-	int enable_err = pstepper_enable(handler, 65536);
+	int enable_err = pstepper_enable(handler, 65536, 1);
 	if (enable_err != 0) {
 		fprintf(stderr, "Warning: got pstepper syscall failure: %s\n", strerror(enable_err));
 	}

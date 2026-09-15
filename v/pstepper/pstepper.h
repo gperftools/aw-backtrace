@@ -91,7 +91,7 @@ typedef void (*pstepper_handler_fn)(int uxi_kind, void *info, ucontext_t *uc);
  * frees it again in pstepper_disable(). Returns errno. So 0 on
  * success, and e.g. ENOSYS on failure.
  */
-int pstepper_enable(pstepper_handler_fn handler, uint64_t upcall_stack_size);
+int pstepper_enable(pstepper_handler_fn handler, uint64_t upcall_stack_size, int enable_acceleration);
 void pstepper_disable(void);
 
 #if defined(__cplusplus)

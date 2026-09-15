@@ -155,7 +155,7 @@ static char *pstepper_read_proc_maps(void)
 	return mem;
 }
 
-int pstepper_enable(pstepper_handler_fn handler, uint64_t upcall_stack_size)
+int pstepper_enable(pstepper_handler_fn handler, uint64_t upcall_stack_size, int enable_acceleration)
 {
 	pstepper_user_handler = handler;
 	pstepper_upcall_stack_size = upcall_stack_size;
@@ -165,7 +165,7 @@ int pstepper_enable(pstepper_handler_fn handler, uint64_t upcall_stack_size)
 	 * before stepping is armed. */
 	pstepper_arch_prepare();
 
-	char* maps = pstepper_read_proc_maps();
+	char* maps = enable_acceleration ? pstepper_read_proc_maps() : NULL;
 
 	/* Mmap this (the first / calling) thread's own upcall stack and arm
 	 * stepping for it. Every thread the clone hook bootstraps afterward
@@ -182,7 +182,7 @@ int pstepper_enable(pstepper_handler_fn handler, uint64_t upcall_stack_size)
 		munmap(pstepper_own_upcall_stack, pstepper_upcall_stack_size);
 		pstepper_own_upcall_stack = NULL;
 	}
-	if (ret == 0) {
+	if (enable_acceleration && ret == 0) {
 		pstepper_syscall(PSTEPPER_CMD_ENABLE_ACCELERATION, 1, (uintptr_t)maps, 0, 0, 0);
 	}
 	free(maps);
