@@ -25,7 +25,7 @@ require 'shellwords'
 
 # -Wall but not -Wextra: the qemu plugin callback signatures have many
 # deliberately-unused parameters and -Wextra just makes noise on them.
-BASE_CFLAGS = ENV['CFLAGS'] || "-O1 -g -Wall"
+BASE_CFLAGS = ENV['CFLAGS'] || "-O2 -ggdb3 -Wall"
 LDFLAGS = ENV['LDFLAGS'] || ''
 LIBS = ENV['LIBS'] || ''
 CC = ENV['CC'] || 'cc'
@@ -79,10 +79,12 @@ def build!(b)
   plumbing = b.o(src: ["pstepper.c", "pstepper_#{ARCH}.c", "pstepper_trampoline_#{ARCH}.S"],
                  cflags: GUEST_CFLAGS)
 
+  maybe_fsgsbase = if ARCH == 'amd64' then PLUGIN_CFLAGS + " -mfsgsbase" else PLUGIN_CFLAGS end
+
   # The plugin. dot_so compiles -fPIC and links -shared. Only this TU sees
   # the qemu / glib headers.
   plugin = b.dot_so(name: "pstepper_plugin.so",
-                    inputs: b.o(src: "pstepper_plugin.c", cflags: PLUGIN_CFLAGS))
+                    inputs: b.o(src: "pstepper_plugin.c", cflags: maybe_fsgsbase))
 
   # Self-checking guest programs (each computes a native reference in-process
   # and compares). `b.test` wraps the program in a Test artifact -- returned

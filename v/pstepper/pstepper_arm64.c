@@ -185,7 +185,7 @@ __attribute__((noreturn)) static void pstepper_do_exit_intercept(pstepper_gpregs
 	uint64_t base = (uint64_t)(uintptr_t)pstepper_own_upcall_stack;
 	uint64_t size = pstepper_upcall_stack_size;
 
-	pstepper_syscall(PSTEPPER_CMD_DISABLE, 0, 0, 0, 0);
+	pstepper_syscall(PSTEPPER_CMD_DISABLE, 0, 0, 0, 0, 0);
 	pstepper_thread_exit(resume_sp, base, size, status); /* noreturn */
 }
 

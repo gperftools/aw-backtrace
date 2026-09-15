@@ -82,7 +82,7 @@ extern "C" {
 #endif
 
 // Makes PSTEPPER_SYSCALL_NR syscall
-int pstepper_syscall(uint64_t cmd, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4);
+int pstepper_syscall(uint64_t cmd, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5);
 
 /*
  * The registered upcall handler. Deliberately shaped like a POSIX

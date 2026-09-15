@@ -43,6 +43,12 @@ enum pstepper_cmd {
 	 *        recognizes execution reaching this exact address as "pop
 	 *        [SP]/[SP+8] into PC/SP and resume", rather than as a real
 	 *        illegal-instruction fault.
+	 * arg5 = pstepper_user_handler's own entry PC. Used only for the
+	 *        acceleration hook (PSTEPPER_CMD_ENABLE_ACCELERATION): the
+	 *        plugin recognizes execution reaching this exact address as "the
+	 *        handler is about to run" and, if acceleration is enabled,
+	 *        invokes it as a native host call instead of single-stepping
+	 *        through it.
 	 *
 	 * Arms single-stepping for the calling thread. The upcall stack must be
 	 * sized generously -- as with a POSIX sigaltstack, the entire handler
@@ -53,6 +59,14 @@ enum pstepper_cmd {
 
 	/* Disarms single-stepping for the calling thread. */
 	PSTEPPER_CMD_DISABLE = 3,
+
+	/*
+	 * arg1 = 0 or 1: disable/enable the acceleration hook (see
+	 *        PSTEPPER_CMD_ENABLE's arg5). Process-wide, not per-thread.
+	 * arg2 = asciiz contents of guest's /proc/self/maps
+	 *
+	 */
+	PSTEPPER_CMD_ENABLE_ACCELERATION = 4,
 };
 
 /* The (currently only) kind of UXI, handed to the handler in its first

@@ -31,9 +31,9 @@ __attribute__((noreturn)) void pstepper_die(const char *msg)
 	abort();
 }
 
-int pstepper_syscall(uint64_t cmd, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4)
+int pstepper_syscall(uint64_t cmd, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5)
 {
-	return syscall(PSTEPPER_SYSCALL_NR, cmd, arg1, arg2, arg3, arg4);
+	return syscall(PSTEPPER_SYSCALL_NR, cmd, arg1, arg2, arg3, arg4, arg5);
 }
 
 /*
@@ -91,7 +91,8 @@ void *pstepper_alloc_upcall_stack(uint64_t size)
 static int pstepper_arm_stepping(uint64_t upcall_top, int resuming)
 {
 	return pstepper_syscall(PSTEPPER_CMD_ENABLE, (uint64_t)(uintptr_t)pstepper_trampoline, upcall_top,
-				(uint64_t)resuming, (uint64_t)(uintptr_t)pstepper_resume_marker);
+				(uint64_t)resuming, (uint64_t)(uintptr_t)pstepper_resume_marker,
+				(uint64_t)(uintptr_t)pstepper_user_handler);
 }
 
 /*
@@ -114,6 +115,46 @@ __attribute__((noreturn)) void pstepper_child_bootstrap(uint64_t upcall_stack_ba
 	pstepper_resume_via_frame(child_frame_base); /* noreturn */
 }
 
+static char *pstepper_read_proc_maps(void)
+{
+	/*
+	 * Report every range this process itself considers executable, from
+	 * its own /proc/self/maps -- QEMU synthesizes this per-guest from its
+	 * own guest-page bookkeeping, so it lists only this process's own
+	 * mappings (never QEMU's own unrelated host libraries) with accurate
+	 * r-xp flags. The plugin has no other way to find pstepper_user_handler's
+	 * transitive call graph (whatever library code it ends up calling into)
+	 * to make host-executable.
+	 *
+	 * Guest vaddrs are handed to the plugin as-is; it treats them as host
+	 * pointers directly (no guest_base translation), which is exact only
+	 * when QEMU picked an identity mapping.
+	 */
+	FILE *f = fopen("/proc/self/maps", "r");
+	if (!f) {
+		perror("fopen");
+		return NULL;
+	}
+	size_t sz = 16 << 10;
+	char *mem = malloc(sz);
+	size_t eaten = 0;
+	for (;;) {
+		int readen = fread(mem + eaten, 1, sz - 1 - eaten, f);
+		if (readen <= 0) {
+			/* silently assume eof */
+			break;
+		}
+		eaten += (size_t)readen;
+		if (eaten >= sz - 1) {
+			sz *= 2;
+			mem = realloc(mem, sz);
+		}
+	}
+	mem[eaten] = 0;
+	fprintf(stderr, "[pstepper plumbing]: feeding proc maps:\n%.*s\n\n", (int)eaten, mem);
+	return mem;
+}
+
 int pstepper_enable(pstepper_handler_fn handler, uint64_t upcall_stack_size)
 {
 	pstepper_user_handler = handler;
@@ -123,6 +164,8 @@ int pstepper_enable(pstepper_handler_fn handler, uint64_t upcall_stack_size)
 	 * xsave/xrstor mask, read by the asm on the very first trap), done
 	 * before stepping is armed. */
 	pstepper_arch_prepare();
+
+	char* maps = pstepper_read_proc_maps();
 
 	/* Mmap this (the first / calling) thread's own upcall stack and arm
 	 * stepping for it. Every thread the clone hook bootstraps afterward
@@ -139,12 +182,16 @@ int pstepper_enable(pstepper_handler_fn handler, uint64_t upcall_stack_size)
 		munmap(pstepper_own_upcall_stack, pstepper_upcall_stack_size);
 		pstepper_own_upcall_stack = NULL;
 	}
+	if (ret == 0) {
+		pstepper_syscall(PSTEPPER_CMD_ENABLE_ACCELERATION, 1, (uintptr_t)maps, 0, 0, 0);
+	}
+	free(maps);
 	return ret;
 }
 
 void pstepper_disable(void)
 {
-	if (pstepper_syscall(PSTEPPER_CMD_DISABLE, 0, 0, 0, 0) < 0) {
+	if (pstepper_syscall(PSTEPPER_CMD_DISABLE, 0, 0, 0, 0, 0) < 0) {
 		pstepper_die("PSTEPPER_CMD_DISABLE failed");
 	}
 	if (pstepper_own_upcall_stack) {

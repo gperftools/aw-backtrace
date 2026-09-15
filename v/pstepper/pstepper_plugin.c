@@ -124,12 +124,18 @@
  */
 #include "pstepper_abi.h"
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
+
+#if __x86_64__
+#include <immintrin.h>
+#endif
 
 #include "qemu-plugin.h"
 
@@ -230,6 +236,9 @@ typedef struct {
 	uint64_t excl_pc; /* PC of the ldxr that opened the current region */
 
 	struct qemu_plugin_register *reg_sp;
+	struct qemu_plugin_register *reg_third_arg; /* acceleration hook: real 3rd arg (ucontext_t*) */
+	struct qemu_plugin_register *reg_lr; /* link register for calls. Unused on x86 */
+	struct qemu_plugin_register *reg_tls_base;
 } VcpuState;
 
 #define MAX_VCPUS 256
@@ -278,6 +287,10 @@ static qemu_plugin_u64 g_gate;
  * execute the bare ud2/brk: a loud SIGILL, not a silent wedge.
  */
 static uint64_t g_resume_marker_pc;
+static uint64_t g_acceleration_pc;
+static bool g_acceleration_enabled;
+
+static int g_identity_mapping = -1;
 
 static void set_gate(unsigned int vcpu_index, uint64_t value)
 {
@@ -371,7 +384,53 @@ static void write_mem64(uint64_t vaddr, uint64_t v)
 	}
 }
 
-static void do_insn_exec(unsigned int vcpu_index, uint64_t vaddr, InsnKind kind)
+typedef void (*callback_fn)(uintptr_t, uintptr_t, uintptr_t);
+
+long accelerated_calls;
+
+#if __x86_64__
+static __attribute__((noreturn))
+void pstepper_invoke_acceleration(VcpuState *st, uint64_t vaddr)
+{
+	uint64_t sp = read_reg64(st->reg_sp);
+	uint64_t ret_addr = read_mem64(sp);
+	sp += 8;
+	uint64_t arg = read_reg64(st->reg_third_arg);
+	callback_fn fn = (callback_fn)vaddr;
+	accelerated_calls++;
+	uint64_t tls_base = read_reg64(st->reg_tls_base);
+	uint64_t host_fsbase = _readfsbase_u64();
+	_writefsbase_u64(tls_base);
+	fn(1, 0, arg);
+	_writefsbase_u64(host_fsbase);
+	write_reg64(st->reg_sp, sp);
+	qemu_plugin_set_pc(ret_addr); /* noreturn */
+}
+#elif __aarch64__
+static __attribute__((noreturn))
+void pstepper_invoke_acceleration(VcpuState *st, uint64_t vaddr)
+{
+	uint64_t ret_addr = read_reg64(st->reg_lr);
+	uint64_t arg = read_reg64(st->reg_third_arg);
+	callback_fn fn = (callback_fn)vaddr;
+	accelerated_calls++;
+	uint64_t tls_base = read_reg64(st->reg_tls_base);
+	uint64_t host_tls;
+	asm volatile ("mrs %0, tpidr_el0\n\t"
+		      "msr tpidr_el0, %1"
+		      : "=r" (host_tls) : "r" (tls_base));
+	fn(1, 0, arg);
+	asm volatile ("msr tpidr_el0, %0" : : "r" (host_tls));
+	qemu_plugin_set_pc(ret_addr); /* noreturn */
+}
+#else
+static void pstepper_invoke_acceleration(...)
+{
+	abort(); // bug/impossible
+}
+#endif
+
+static void pstepper_step_insn(unsigned int vcpu_index, uint64_t vaddr, InsnKind kind)
 {
 	VcpuState *st = state_for(vcpu_index);
 
@@ -393,6 +452,25 @@ static void do_insn_exec(unsigned int vcpu_index, uint64_t vaddr, InsnKind kind)
 		set_gate(vcpu_index, GATE_ARMED);
 		write_reg64(st->reg_sp, st->resume_sp);
 		qemu_plugin_set_pc(st->resume_pc); /* noreturn */
+		g_assert_not_reached();
+	}
+
+	if (vaddr == g_acceleration_pc) {
+		if (!g_acceleration_enabled) {
+			return;
+		}
+		/*
+		 * pstepper_invoke_handler() already ran normally as ordinary guest
+		 * code (it is not intercepted -- only g_acceleration_pc itself,
+		 * pstepper_user_handler's entry, is) and already executed the real
+		 * `call pstepper_user_handler(PSTEPPER_UXI_STEP, NULL, &uc)`. So by
+		 * the time we land here the real SysV args are already in
+		 * registers: rdi=1, rsi=0, rdx=&uc (a genuine, already-built
+		 * ucontext_t on the guest's own upcall stack). We only need to read
+		 * rdx and call natively instead of letting TCG step through the
+		 * callee's body.
+		 */
+		pstepper_invoke_acceleration(st, vaddr);
 		g_assert_not_reached();
 	}
 
@@ -482,31 +560,38 @@ static void do_insn_exec(unsigned int vcpu_index, uint64_t vaddr, InsnKind kind)
  * registered, so nothing has to be decoded again on the hot path. x86_64
  * only ever uses vcpu_insn_exec.
  */
-static void vcpu_insn_exec(unsigned int vcpu_index, void *userdata)
+static void pstepper_vcpu_step_exec(unsigned int vcpu_index, void *userdata)
 {
-	do_insn_exec(vcpu_index, (uint64_t)userdata, INSN_NORMAL);
+	pstepper_step_insn(vcpu_index, (uint64_t)userdata, INSN_NORMAL);
 }
-static void vcpu_insn_exec_load_excl(unsigned int vcpu_index, void *userdata)
+static void pstepper_vcpu_step_exec_load_excl(unsigned int vcpu_index, void *userdata)
 {
-	do_insn_exec(vcpu_index, (uint64_t)userdata, INSN_LOAD_EXCL);
+	pstepper_step_insn(vcpu_index, (uint64_t)userdata, INSN_LOAD_EXCL);
 }
-static void vcpu_insn_exec_store_excl(unsigned int vcpu_index, void *userdata)
+static void pstepper_vcpu_step_exec_store_excl(unsigned int vcpu_index, void *userdata)
 {
-	do_insn_exec(vcpu_index, (uint64_t)userdata, INSN_STORE_EXCL);
+	pstepper_step_insn(vcpu_index, (uint64_t)userdata, INSN_STORE_EXCL);
 }
-static void vcpu_insn_exec_clrex(unsigned int vcpu_index, void *userdata)
+static void pstepper_vcpu_step_exec_clrex(unsigned int vcpu_index, void *userdata)
 {
-	do_insn_exec(vcpu_index, (uint64_t)userdata, INSN_CLREX);
+	pstepper_step_insn(vcpu_index, (uint64_t)userdata, INSN_CLREX);
 }
 
-static void vcpu_tb_trans(struct qemu_plugin_tb *tb, void *userdata)
+static void pstepper_vcpu_tb_trans(struct qemu_plugin_tb *tb, void *userdata)
 {
 	size_t n = qemu_plugin_tb_n_insns(tb);
+
+	if (g_identity_mapping < 0 && n > 0) {
+		struct qemu_plugin_insn *insn = qemu_plugin_tb_get_insn(tb, 0);
+		uint64_t vaddr = qemu_plugin_insn_vaddr(insn);
+		uint64_t haddr = (uint64_t)(uintptr_t)qemu_plugin_insn_haddr(insn);
+		g_identity_mapping = (vaddr == haddr);
+	}
 
 	for (size_t i = 0; i < n; i++) {
 		struct qemu_plugin_insn *insn = qemu_plugin_tb_get_insn(tb, i);
 		uint64_t vaddr = qemu_plugin_insn_vaddr(insn);
-		qemu_plugin_vcpu_udata_cb_t cb = vcpu_insn_exec;
+		qemu_plugin_vcpu_udata_cb_t cb = pstepper_vcpu_step_exec;
 
 		/*
 		 * On aarch64, pick the class-specific entry point so the
@@ -525,13 +610,13 @@ static void vcpu_tb_trans(struct qemu_plugin_tb *tb, void *userdata)
 			}
 			switch (classify_a64(word)) {
 			case INSN_LOAD_EXCL:
-				cb = vcpu_insn_exec_load_excl;
+				cb = pstepper_vcpu_step_exec_load_excl;
 				break;
 			case INSN_STORE_EXCL:
-				cb = vcpu_insn_exec_store_excl;
+				cb = pstepper_vcpu_step_exec_store_excl;
 				break;
 			case INSN_CLREX:
-				cb = vcpu_insn_exec_clrex;
+				cb = pstepper_vcpu_step_exec_clrex;
 				break;
 			case INSN_NORMAL:
 				break;
@@ -540,10 +625,44 @@ static void vcpu_tb_trans(struct qemu_plugin_tb *tb, void *userdata)
 
 		/* See GATE_* above: the resume marker has to be delivered while
 		 * a trap is parked, everything else only while armed. */
-		uint64_t gate_min = (g_resume_marker_pc != 0 && vaddr == g_resume_marker_pc) ? GATE_PARKED : GATE_ARMED;
+		bool want_step = (g_resume_marker_pc != 0 && vaddr == g_resume_marker_pc);
+		want_step = want_step || (g_acceleration_pc != 0 && vaddr == g_acceleration_pc);
+		uint64_t gate_min = want_step ? GATE_PARKED : GATE_ARMED;
 
 		qemu_plugin_register_vcpu_insn_exec_cond_cb(insn, cb, QEMU_PLUGIN_CB_RW_REGS_PC, QEMU_PLUGIN_COND_GE,
 							   g_gate, gate_min, (void *)vaddr);
+	}
+}
+
+static void pstepper_enable_prot_exec(const char *guest_proc_maps)
+{
+	long start_addr, end_addr;
+	int perm_start, bytes_read;
+	const char *s = guest_proc_maps;
+	const char *next_s;
+	for (; *s; s = next_s) {
+		// lines are like this:
+		//
+		// 7ffff5301000-7ffff5469000 r-xp 00028000 103:02 833390203 /usr/lib/x86_64-linux-gnu/libc.so.6
+		int rv = sscanf(s, "%lx-%lx %n%*[^\n]\n%n", &start_addr, &end_addr, &perm_start, &bytes_read);
+		if (rv != 2) {
+			g_assert(rv < 2);
+			break;
+		}
+		next_s = s + bytes_read;
+		if (perm_start + 3 >= bytes_read)
+			continue;
+		char maybe_x = s[perm_start + 2]; // s+perm_start is rwxp perm thingy
+		// qemu-user on x86 does vsyscall mapping which has high bit set
+		if (maybe_x != 'x' || start_addr <= 0 || end_addr <= 0)
+			continue;
+
+		rv = mprotect((void *)start_addr, end_addr - start_addr,
+			      PROT_READ | PROT_EXEC);
+		if (rv != 0) {
+			die("pstepper: mprotect(0x%lx, 0x%lx) PROT_EXEC failed: %s", start_addr, end_addr - start_addr, strerror(errno));
+		}
+		fprintf(stderr, "[pstepper] mprotect PROT_EXEC for host mapping of: %.*s\n", bytes_read - 1, s);
 	}
 }
 
@@ -575,10 +694,20 @@ static bool vcpu_syscall_filter(unsigned int vcpu_index, int64_t num, uint64_t a
 			    "; it is baked into translated code and must be process-wide",
 			    vcpu_index, g_resume_marker_pc, a5);
 		}
-		st->reg_sp = find_reg((g_target == TARGET_X86_64) ? "rsp" : "sp");
+		if (g_target == TARGET_X86_64) {
+			st->reg_sp = find_reg("rsp");
+			st->reg_third_arg = find_reg("rdx");
+			st->reg_tls_base = find_reg("fs_base");
+		} else {
+			st->reg_sp = find_reg("sp");
+			st->reg_third_arg = find_reg("x2");
+			st->reg_tls_base = find_reg("tpidr");
+			st->reg_lr = find_reg("x30");
+		}
 		st->trampoline_pc = a2;
 		st->upcall_stack_top = a3;
 		st->resume_marker_pc = a5;
+		g_acceleration_pc = a6;
 		st->stepping_enabled = true;
 		st->in_trap = (a4 != 0);
 		st->resume_pc = 0;
@@ -605,6 +734,23 @@ static bool vcpu_syscall_filter(unsigned int vcpu_index, int64_t num, uint64_t a
 		st->excl_pc = 0;
 		set_gate(vcpu_index, GATE_OFF);
 		fprintf(stderr, "[pstepper] vcpu%u: stepping disabled\n", vcpu_index);
+		*sysret = 0;
+		return true;
+
+	case PSTEPPER_CMD_ENABLE_ACCELERATION:
+		if (!g_acceleration_pc) {
+			*sysret = -EINVAL;
+			return true;
+		}
+		if (g_identity_mapping != 1) {
+			fprintf(stderr, "[pstepper] cannot enable acceleration due to non-identity mapping\n");
+		}
+		/* a2 = enable/disable flag (a1 is the command number itself). */
+		g_acceleration_enabled = (g_identity_mapping == 1) && !!a2;
+		if (g_acceleration_enabled && a3) {
+			pstepper_enable_prot_exec((const char *)a3);
+			fprintf(stderr, "[pstepper] stepping is accelerated!!! \\o/ !!!\n");
+		}
 		*sysret = 0;
 		return true;
 
@@ -639,6 +785,6 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
 	g_gate = qemu_plugin_scoreboard_u64(g_gate_score);
 
 	qemu_plugin_register_vcpu_syscall_filter_cb(id, vcpu_syscall_filter, NULL);
-	qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans, NULL);
+	qemu_plugin_register_vcpu_tb_trans_cb(id, pstepper_vcpu_tb_trans, NULL);
 	return 0;
 }
