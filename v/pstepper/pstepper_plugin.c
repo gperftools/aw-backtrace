@@ -61,16 +61,30 @@
  * stxr then fails on every retry, and the loop livelocks (verified
  * empirically -- a plain getpid() in the gap is enough).
  *
- * So on aarch64 the plugin always steps *over* an exclusive region. From a
+ * What clears it is specifically linux-user's cpu_loop, which resets
+ * exclusive_addr every time cpu_exec() returns to it -- a guest svc, an
+ * interrupt request, an atomic step. The upcall mechanics themselves never
+ * get there: qemu_plugin_set_pc() longjmps back into cpu_exec's own loop.
+ * So with acceleration on, where the handler body runs natively and its
+ * syscalls go straight to the host kernel, the reservation survives and
+ * nothing needs stepping over; the step-over below is armed only when
+ * acceleration is off. (The part of the upcall that still runs under TCG --
+ * trampoline, pstepper_invoke_handler, the ucontext build -- makes no svc
+ * and uses no exclusives on the step path.)
+ *
+ * Without acceleration the plugin steps *over* an exclusive region. From a
  * stepped ldxr{,p}/ldaxr{,p} until its closing stxr/stlxr/stxp/stlxp/clrex
  * -- or until the PC leaves a small window around the ldxr, whichever comes
  * first -- no upcalls are delivered and the region runs unstepped at full
  * speed. Consequence for the consumer: it sees one upcall at the ldxr per
- * retry iteration and nothing between the ldxr and the stxr. For a
- * backtrace-style consumer the backtrace is identical across the whole
- * region, so this is invisible in practice; it is still a real difference
- * from x86 (where every instruction of a `lock cmpxchg` retry loop is
- * stepped) and is called out here for that reason.
+ * retry iteration and nothing between the ldxr and the stxr.
+ *
+ * That is NOT invisible to a backtrace-style consumer. A compare-and-swap
+ * whose compare fails branches straight to its `ret` without any stxr or
+ * clrex (`ldxr; cmp; b.ne 1f; stxr; cbnz; 1: ret` -- libgcc's outlined
+ * __aarch64_cas* helpers), so the region is still armed there and the `ret`
+ * runs unstepped. A consumer tracking calls and returns never sees it and
+ * keeps a stale frame for the helper.
  *
  * The window is a backstop, not the primary close condition: a budget that
  * expired *mid-region* would resume stepping between the ldxr and stxr --
@@ -487,12 +501,13 @@ static void pstepper_step_insn(unsigned int vcpu_index, uint64_t vaddr, InsnKind
 	 * pair, start stepping over everything until its store half (see (4)
 	 * and the "aarch64 LL/SC" block in the file header). Case (3)
 	 * passthrough never reaches here, so trampoline/handler ldxrs cannot
-	 * arm the region -- exactly right.
+	 * arm the region -- exactly right. With acceleration on the reservation
+	 * survives the upcalls, so the region is stepped like anything else.
 	 */
 	if (st->resume_pc && vaddr == st->resume_pc && read_reg64(st->reg_sp) == st->resume_sp) {
 		st->resume_pc = 0;
 		st->in_trap = false;
-		if (kind == INSN_LOAD_EXCL) {
+		if (kind == INSN_LOAD_EXCL && !g_acceleration_enabled) {
 			st->mon_armed = true;
 			st->excl_pc = vaddr;
 		}
