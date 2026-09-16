@@ -220,6 +220,27 @@ class FrameLookupState : public UnwindVisitor {
       info_->fp = RegisterRule::SameValue();
       return true;
     }
+    if (reg == Arch::kRAReg) {
+      // Real compilers (LLVM at least) emit this on architectures
+      // where RA is aliased to an actual, still-live register --
+      // e.g. x30/LR on aarch64. Meaning of this is still somewhat odd
+      // to me. What does it mean x30 is "same as caller" if it's
+      // original caller's value is forever lost after bl (branch with
+      // link) instruction. In any case, this is what we see. And I
+      // guess it could also mean "x30 of the caller after we return"
+      // which is the call site we return to.
+      //
+      // On x86 the kRAReg is "virtual" register DWARF-wise, and would
+      // make no sense to say "rip is now same as call site". So we
+      // check if arch default is link register (so x30 on arm64-s)
+      // and then allow it with that meaning described above.
+      FrameInfo defaults;
+      Arch::ResetFrameInfo(&defaults);
+      if (defaults.ra.kind == RegisterRule::Kind::InReg) {
+        info_->ra = defaults.ra;
+        return true;
+      }
+    }
     return ReportError("same_value for critical register %lu", (unsigned long)reg);
   }
 
