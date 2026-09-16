@@ -147,10 +147,62 @@ struct Arch {
       return true;
     }
 
-    return false;
+    return DetectPLT0(ip, info, bounds);
   }
 
  private:
+  // PLT0, the lazy-binding header every not-yet-resolved PLT entry branches
+  // to. GNU ld and lld both emit
+  //
+  //   bti  c                        only in a BTI-marked link
+  //   stp  x16, x30, [sp, #-16]!
+  //   adrp x16, <GOT page>
+  //   ldr  x17, [x16, #lo12]        the resolver, _dl_runtime_resolve
+  //   add  x16, x16, #lo12
+  //   br   x17
+  //
+  // with no CFI, and unlike an ordinary entry it moves sp. Past the stp the
+  // CFA is sp + 16, which the x30-is-live guess would take as sp -- and the
+  // caller's sp-based CFI then reads its return address out of the slot this
+  // very stp filled, reporting the caller twice. x30 itself is untouched (the
+  // stp only copied it), so the return address stays in the register.
+  //
+  // It is 32 bytes and does not fit the 16-byte slot logic above, so instead
+  // try ip at each instruction position and match the whole sequence.
+  static bool DetectPLT0(uintptr_t ip, FrameInfo* info, std::pair<uintptr_t, uintptr_t> bounds) {
+    static constexpr uint32_t kBtiC = 0xd503245f;
+    static constexpr uint32_t kStpX16X30PreIndex = 0xa9bf7bf0;
+    static constexpr uint32_t kBrX17 = 0xd61f0220;
+
+    if ((ip & 3) != 0) {
+      return false;
+    }
+    // idx is ip's position relative to the stp; -1 is the bti in front of it.
+    for (int idx = -1; idx <= 4; idx++) {
+      uintptr_t stp_addr = ip - static_cast<uintptr_t>(4 * idx);
+      if (!InBounds(stp_addr, 5 * sizeof(uint32_t), bounds)) {
+        continue;
+      }
+      const uint32_t* code = reinterpret_cast<const uint32_t*>(stp_addr);
+      if (code[0] != kStpX16X30PreIndex ||
+          (code[1] & 0x9f00001f) != 0x90000010 ||  // adrp x16
+          (code[2] & 0xffc003ff) != 0xf9400211 ||  // ldr x17, [x16, #imm]
+          (code[3] & 0xffc003ff) != 0x91000210 ||  // add x16, x16, #imm
+          code[4] != kBrX17) {
+        continue;
+      }
+      if (idx == -1 && (!InBounds(ip, sizeof(uint32_t), bounds) || *reinterpret_cast<const uint32_t*>(ip) != kBtiC)) {
+        continue;
+      }
+
+      info->cfa = CfaRule::SpRel(idx >= 1 ? 16 : 0);
+      info->fp = RegisterRule::SameValue();
+      info->ra = RegisterRule::InReg(30);
+      return true;
+    }
+    return false;
+  }
+
   template <typename AddrChecker>
   static bool CheckPossiblePC(AddrChecker* checker, uintptr_t maybe_pc) {
     // Every aarch64 instruction is 4-byte aligned, so this is free precision

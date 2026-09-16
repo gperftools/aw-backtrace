@@ -7,6 +7,9 @@
 // .cfi_startproc, so the assembler emits no FDE for them and DoUnwindLookup
 // fails on every pc inside them.
 //
+// The exception is case 6, PLT0, which is also CFI-less but is recognised by
+// Arch::DetectPLTEntry before the guess ever runs.
+//
 // glibc's backtrace() is not a usable reference here (libgcc gives up at the
 // first frame without CFI -- which is the whole point of these fixtures), so
 // each case checks against addresses exported from the asm itself.
@@ -20,7 +23,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <ucontext.h>
+#include <unistd.h>
 
 #include <algorithm>
 
@@ -47,6 +52,16 @@ extern const char cfiless_stale_lr_site[];
 // The instruction after `blr` on a null register, i.e. what x30 holds when the
 // fetch at 0 faults.
 extern const char null_call_return_site[];
+
+void plt0_bti_fixture();
+void plt0_plain_fixture();
+void call_plt0_outer(void (*plt0)());
+// The ldr in each PLT0 fixture that faults on plt0_got.
+extern const char plt0_bti_fault_site[];
+extern const char plt0_plain_fault_site[];
+extern const char plt0_call_ret_site[];
+extern const char plt0_outer_ret_site[];
+extern char plt0_got[];
 }
 
 // All the fixtures. `udf #0` raises SIGILL and, unlike x86's ud2, is exactly
@@ -234,6 +249,96 @@ null_call_return_site:
 	ret
 	.cfi_endproc
 	.size null_call_test_fn, .-null_call_test_fn
+
+// ---- case 6: PLT0, the lazy-binding header, in both its BTI and plain
+// shapes. The GOT load faults (main makes plt0_got PROT_NONE), so the capture
+// happens after the stp has already moved sp by 16 -- the window where CFA ==
+// sp is wrong and DetectPLTEntry has to recognise the stub. ----
+	.global plt0_bti_fixture
+	.type plt0_bti_fixture, %function
+	.balign 16
+plt0_bti_fixture:
+	bti	c
+	stp	x16, x30, [sp, #-16]!
+	adrp	x16, plt0_got
+	.global plt0_bti_fault_site
+plt0_bti_fault_site:
+	ldr	x17, [x16, #:lo12:plt0_got]
+	add	x16, x16, #:lo12:plt0_got
+	br	x17
+	nop
+	nop
+	.size plt0_bti_fixture, .-plt0_bti_fixture
+
+	.global plt0_plain_fixture
+	.type plt0_plain_fixture, %function
+	.balign 16
+plt0_plain_fixture:
+	stp	x16, x30, [sp, #-16]!
+	adrp	x16, plt0_got
+	.global plt0_plain_fault_site
+plt0_plain_fault_site:
+	ldr	x17, [x16, #:lo12:plt0_got]
+	add	x16, x16, #:lo12:plt0_got
+	br	x17
+	nop
+	nop
+	nop
+	.size plt0_plain_fixture, .-plt0_plain_fixture
+
+// x0 = the fixture. Two CFI'd frames above it, so that the frame *after* the
+// one x30 recovers is checkable too: that is where a wrong CFA shows, as
+// call_plt0 repeated.
+	.global call_plt0
+	.type call_plt0, %function
+call_plt0:
+	.cfi_startproc
+	bti	c
+	stp	x29, x30, [sp, #-16]!
+	.cfi_def_cfa_offset 16
+	.cfi_offset 29, -16
+	.cfi_offset 30, -8
+	mov	x29, sp
+	blr	x0
+	.global plt0_call_ret_site
+plt0_call_ret_site:
+	ldp	x29, x30, [sp], #16
+	.cfi_restore 30
+	.cfi_restore 29
+	.cfi_def_cfa_offset 0
+	ret
+	.cfi_endproc
+	.size call_plt0, .-call_plt0
+
+	.global call_plt0_outer
+	.type call_plt0_outer, %function
+call_plt0_outer:
+	.cfi_startproc
+	bti	c
+	stp	x29, x30, [sp, #-16]!
+	.cfi_def_cfa_offset 16
+	.cfi_offset 29, -16
+	.cfi_offset 30, -8
+	mov	x29, sp
+	bl	call_plt0
+	.global plt0_outer_ret_site
+plt0_outer_ret_site:
+	ldp	x29, x30, [sp], #16
+	.cfi_restore 30
+	.cfi_restore 29
+	.cfi_def_cfa_offset 0
+	ret
+	.cfi_endproc
+	.size call_plt0_outer, .-call_plt0_outer
+
+// A whole 64K aligned block of its own, so that protecting its first page
+// touches nothing else at any page size up to 64K.
+	.section .bss.plt0_got, "aw", %nobits
+	.balign 65536
+	.global plt0_got
+plt0_got:
+	.skip 65536
+	.text
 )");
 
 namespace {
@@ -327,8 +432,52 @@ bool in_null_call_test;
 sigjmp_buf null_call_jmp;
 void* aw_trace2[kBTSize];
 
+// ---- the PLT0 cases, which fault on the GOT load ----
+
+struct Plt0Case {
+  const char* name;
+  void (*fn)();
+  const char* fault_site;
+};
+
+const Plt0Case* current_plt0;
+sigjmp_buf plt0_jmp;
+
+void HandlePlt0Fault(siginfo_t* si, ucontext_t* uc) {
+  CHECK(si->si_addr == plt0_got);
+
+  printf("=== %s\n", current_plt0->name);
+
+  int aw_count = aw_backtrace(uc, aw_trace, kBTSize, 0);
+  Dump("aw_backtrace", aw_trace, aw_count);
+
+  CHECK(aw_count >= 4);
+  CHECK(aw_trace[0] == reinterpret_cast<void*>(uc->uc_mcontext.pc));
+  // x30, untouched by the stp.
+  CHECK(aw_trace[1] == reinterpret_cast<const void*>(plt0_call_ret_site));
+  // Taking CFA as sp here would make call_plt0's sp-based CFI read its return
+  // address from the slot PLT0's stp just filled, and repeat frame 1.
+  CHECK(aw_trace[2] == reinterpret_cast<const void*>(plt0_outer_ret_site));
+
+  siglongjmp(plt0_jmp, 1);
+}
+
+NEVER_INLINE void RunPlt0Case(const Plt0Case* plt0_case) {
+  current_plt0 = plt0_case;
+  if (sigsetjmp(plt0_jmp, 1) == 0) {
+    call_plt0_outer(plt0_case->fn);
+    CHECK(false);  // the GOT load was supposed to fault
+  }
+  current_plt0 = nullptr;
+  printf("---\n");
+}
+
 void sigsegv_handler(int, siginfo_t* si, void* _uc) {
   ucontext_t* uc = static_cast<ucontext_t*>(_uc);
+
+  if (current_plt0 != nullptr && uc->uc_mcontext.pc == reinterpret_cast<uintptr_t>(current_plt0->fault_site)) {
+    HandlePlt0Fault(si, uc);  // noreturn
+  }
 
   if (!in_null_call_test || uc->uc_mcontext.pc != 0) {
     signal(SIGSEGV, SIG_DFL);
@@ -416,6 +565,17 @@ int main() {
   }
 
   RunNullCallCase();
+
+  long page_size = sysconf(_SC_PAGESIZE);
+  CHECK(page_size > 0 && page_size <= 65536);
+  CHECK(mprotect(plt0_got, page_size, PROT_NONE) == 0);
+  static const Plt0Case kPlt0Cases[] = {
+      {"PLT0 with bti, past the stp", plt0_bti_fixture, plt0_bti_fault_site},
+      {"PLT0 without bti, past the stp", plt0_plain_fixture, plt0_plain_fault_site},
+  };
+  for (const Plt0Case& c : kPlt0Cases) {
+    RunPlt0Case(&c);
+  }
 
   printf("PASSED\n");
 }

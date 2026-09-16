@@ -282,13 +282,17 @@ for anything in an initially-loaded module, and only falls through to
 `aw-addrcheck` otherwise — where, without `PROCMAP_QUERY`, it is a snapshot and
 parse of the whole of `/proc/self/maps`.
 
-When the lookup produces nothing, a **fallback chain** runs in this order: PLT
-detection (leaf only) → signal-trampoline byte match → DRAP (x86-64, and only
-if the failure was a CFI expression) → refuse outright if it was a CFI
-expression → `Arch::GuessUnwindInfo`. Everything in it that reads code bytes is
-bounds-checked against `AddrChecker::ExecutableBoundsFor()`, the DRAP `lea`
-sniff included — that one takes the bounds as a parameter and falls back to
-trusting the unwind info when it can't read safely.
+When the lookup produces nothing, a **fallback chain** runs in this
+order: PLT detection (leaf only; includes PLT0, the lazy-binding
+header, which on aarch64 moves sp by 16 before branching to the
+resolver) → signal-trampoline byte match (at the trampoline's entry or
+at its `syscall`, so a sample landing on that one instruction still
+unwinds) → DRAP (x86-64, and only if the failure was a CFI expression)
+→ refuse outright if it was a CFI expression →
+`Arch::GuessUnwindInfo`. Everything in it that reads code bytes is
+bounds-checked against `AddrChecker::ExecutableBoundsFor()`, the DRAP
+`lea` sniff included — that one takes the bounds as a parameter and
+falls back to trusting the unwind info when it can't read safely.
 
 All stack reads go through `StackAccess` (alignment + containment in a stack
 VMA). Two properties, both driven by comparer findings: a read outside the
