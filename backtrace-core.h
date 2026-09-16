@@ -42,6 +42,13 @@ enum class LookupOutcome {
 // exceptional, off-the-fast-path case).
 LookupOutcome DoUnwindLookup(uintptr_t lookup_ip, FrameInfo* info, DiagFlags diag);
 
+// The half of DoUnwindLookup below LocateEHFrame: runs the CFI decoder
+// against an already-built EHReaderInputs (inputs.lookup_pc is what gets
+// looked up), without touching _dl_find_object. For callers that build their
+// own EHReaderInputs -- e.g. an offline tool reading an mmap'd ELF file that
+// isn't loaded into this process at all.
+LookupOutcome DoUnwindLookupFromInputs(const EHReaderInputs& inputs, FrameInfo* info, DiagFlags diag);
+
 EHReaderInputs* LocateEHFrame(uintptr_t lookup_ip, EHReaderInputs* inputs);
 
 }  // namespace aw_backtrace_internal

@@ -408,6 +408,13 @@ EHReaderInputs* LocateEHFrame(uintptr_t lookup_ip, EHReaderInputs* inputs) {
   return inputs;
 }
 
+LookupOutcome DoUnwindLookupFromInputs(const EHReaderInputs& inputs, FrameInfo* info, DiagFlags diag) {
+  FrameLookupState lookup{inputs.lookup_pc, diag};
+
+  Arch::ResetFrameInfo(info);
+  return lookup.DoLookup(inputs, info);
+}
+
 LookupOutcome DoUnwindLookup(uintptr_t lookup_ip, FrameInfo* info, DiagFlags diag) {
   EHReaderInputs inputs_storage;
   EHReaderInputs* inputs = LocateEHFrame(lookup_ip, &inputs_storage);
@@ -415,10 +422,7 @@ LookupOutcome DoUnwindLookup(uintptr_t lookup_ip, FrameInfo* info, DiagFlags dia
     return LookupOutcome::kFail;
   }
 
-  FrameLookupState lookup{lookup_ip, diag};
-
-  Arch::ResetFrameInfo(info);
-  return lookup.DoLookup(*inputs, info);
+  return DoUnwindLookupFromInputs(*inputs, info, diag);
 }
 
 }  // namespace aw_backtrace_internal
