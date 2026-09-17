@@ -93,3 +93,59 @@ programs play this role.
 
 See `./genbuild.rb` for the build model and source-file header
 comments for the detailed design of each piece.
+
+### 5. "Acceleration" hack
+
+So the baseline pstepper was working. Arguably, plenty of easy
+performance savings could be made in the upcall entrance, but even
+with those prospective changes, backtrace-comparer stepping was still
+far too slow.
+
+Comparer's original stepping approach via `SIGTRAP` was running the
+stepping callback at native speed. Under QEMU, for reasons not
+entirely clear, just running aw-backtrace, even with cache hits, is
+about 7-8 times slower than native speed. The stepping plugin, even
+with a conditional per-insn plugin callback, doubles the slowdown to
+around 16x. And when running under backtrace-comparer, most cycles are
+spent in the comparer upcall. I.e., we run hundreds, likely thousands,
+of comparer instructions for each instruction of the original code
+(plus a number of instructions in the trampoline/pstepper plumbing).
+
+So that looked hopelessly slow. I could get significant speedups, but
+it was still far from what was needed. I.e., a "baseline" 6x slowdown
+compared to native speed means that something that under old
+`TF/SIGTRAP` stepper takes a couple of minutes would now take at least
+tens of minutes.
+
+Then I came up with this beautiful hack. We'll ***run guest's stepper
+code directly from the plugin***. Turns out qemu-user tries to
+maintain identity address mapping between guest and host address
+spaces. So all the code is already loaded and at its correct
+addresses. All that was needed was some plumbing to pass the address
+of the function we’ll call directly, plus some mprotect calls to
+enable execution of the loaded guest code.
+
+Here is how it works. When acceleration is successfully activated
+(i.e., we verified identity mapping among other things), we set up our
+plugin to receive a normal per-insn callback at the address of the
+registered upcall callback. At this point, we see we’re about to
+execute the final callback. The plugin grabs the argument registers
+and the guest’s TLS base, then invokes that address directly. Then,
+when the callback returns, it just makes the emulated code “return”.
+
+This approach has quite a few dangers, of course. First, the guest
+code could be an entirely different architecture than the host. More
+subtly, but more likely, the emulated CPU could have a slightly
+different set of extensions. E.g., on x86, QEMU doesn’t emulate
+`AVX-512`, but my CPU has it, and glibc likes to use it for memcpy. On
+ARM, the situation is reversed. The emulated CPU has those nice
+memory-copy instructions (MOPS) that aren't available on my actual
+Chromebook. Signal delivery during such accelerated upcalls is another
+area that asks for trouble. So some care is needed. We only start
+acceleration after at least a couple of instructions. This ensures
+that those possibly lazily resolved IFUNC functions use guest CPU
+capabilities. On ARM, the only workable approach is to manually pass
+the -cpu flag to QEMU so `memcpy()` has a chance of working at all.
+
+Still, even with those risks, fixing the speed problem is worth the
+trouble.
