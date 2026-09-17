@@ -607,6 +607,9 @@ int main(int argc, char* argv[]) {
   // just fails a write() rather than killing this daemon.
   signal(SIGCHLD, SIG_IGN);
   signal(SIGPIPE, SIG_IGN);
+  // When process group gets Ctrl-C lets stay up to help
+  // backtrace-comparer dump backtraces.
+  signal(SIGINT, SIG_IGN);
 
   int orig_mailbox_fd = atoi(argv[1]);
   if (orig_mailbox_fd <= 0) {
