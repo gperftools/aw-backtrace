@@ -140,6 +140,7 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -163,6 +164,9 @@ typedef enum {
 	TARGET_AARCH64,
 } Target;
 static Target g_target;
+
+/* -plugin ...,omit_signal_masking=on -- see qemu_plugin_install(). */
+static bool g_omit_signal_masking;
 
 /*
  * Instruction class, as far as the exclusive-monitor step-over cares (see
@@ -403,8 +407,8 @@ typedef void (*callback_fn)(uintptr_t, uintptr_t, uintptr_t);
 long accelerated_calls;
 
 #if __x86_64__
-static __attribute__((noreturn))
-void pstepper_invoke_acceleration(VcpuState *st, uint64_t vaddr)
+static
+uint64_t pstepper_invoke_acceleration(VcpuState *st, uint64_t vaddr)
 {
 	uint64_t sp = read_reg64(st->reg_sp);
 	uint64_t ret_addr = read_mem64(sp);
@@ -412,17 +416,19 @@ void pstepper_invoke_acceleration(VcpuState *st, uint64_t vaddr)
 	uint64_t arg = read_reg64(st->reg_third_arg);
 	callback_fn fn = (callback_fn)vaddr;
 	accelerated_calls++;
+
 	uint64_t tls_base = read_reg64(st->reg_tls_base);
 	uint64_t host_fsbase = _readfsbase_u64();
 	_writefsbase_u64(tls_base);
 	fn(1, 0, arg);
 	_writefsbase_u64(host_fsbase);
+
 	write_reg64(st->reg_sp, sp);
-	qemu_plugin_set_pc(ret_addr); /* noreturn */
+	return ret_addr;
 }
 #elif __aarch64__
-static __attribute__((noreturn))
-void pstepper_invoke_acceleration(VcpuState *st, uint64_t vaddr)
+static
+uint64_t pstepper_invoke_acceleration(VcpuState *st, uint64_t vaddr)
 {
 	uint64_t ret_addr = read_reg64(st->reg_lr);
 	uint64_t arg = read_reg64(st->reg_third_arg);
@@ -435,7 +441,7 @@ void pstepper_invoke_acceleration(VcpuState *st, uint64_t vaddr)
 		      : "=r" (host_tls) : "r" (tls_base));
 	fn(1, 0, arg);
 	asm volatile ("msr tpidr_el0, %0" : : "r" (host_tls));
-	qemu_plugin_set_pc(ret_addr); /* noreturn */
+	return ret_addr;
 }
 #else
 static void pstepper_invoke_acceleration(...)
@@ -484,7 +490,27 @@ static void pstepper_step_insn(unsigned int vcpu_index, uint64_t vaddr, InsnKind
 		 * rdx and call natively instead of letting TCG step through the
 		 * callee's body.
 		 */
-		pstepper_invoke_acceleration(st, vaddr);
+		sigset_t all;
+		sigset_t prev_mask;
+		int rv;
+		if (!g_omit_signal_masking) {
+			sigfillset(&all);
+			rv = pthread_sigmask(SIG_BLOCK, &all, &prev_mask);
+			if (rv) {
+			bug_sigprocmask:
+				die("failed to sigprocmask");
+			}
+		}
+
+		uint64_t ret_addr = pstepper_invoke_acceleration(st, vaddr);
+
+		if (!g_omit_signal_masking) {
+			rv = pthread_sigmask(SIG_SETMASK, &prev_mask, NULL);
+			if (rv)
+				goto bug_sigprocmask;
+		}
+
+		qemu_plugin_set_pc(ret_addr);
 		g_assert_not_reached();
 	}
 
@@ -794,6 +820,17 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
 		g_target = TARGET_AARCH64;
 	} else {
 		die("unsupported guest target '%s' (supports x86_64, aarch64)", info->target_name);
+	}
+
+	for (int i = 0; i < argc; i++) {
+		g_auto(GStrv) tokens = g_strsplit(argv[i], "=", 2);
+		if (g_strcmp0(tokens[0], "omit_signal_masking") == 0) {
+			if (!qemu_plugin_bool_parse(tokens[0], tokens[1], &g_omit_signal_masking)) {
+				die("boolean argument parsing failed: %s", argv[i]);
+			}
+		} else {
+			die("unknown plugin argument: %s", argv[i]);
+		}
 	}
 
 	g_gate_score = qemu_plugin_scoreboard_new(sizeof(uint64_t));
