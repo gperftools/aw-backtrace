@@ -125,27 +125,37 @@ addresses. All that was needed was some plumbing to pass the address
 of the function we’ll call directly, plus some mprotect calls to
 enable execution of the loaded guest code.
 
-Here is how it works. When acceleration is successfully activated
-(i.e., we verified identity mapping among other things), we set up our
-plugin to receive a normal per-insn callback at the address of the
-registered upcall callback. At this point, we see we’re about to
-execute the final callback. The plugin grabs the argument registers
-and the guest’s TLS base, then invokes that address directly. Then,
-when the callback returns, it just makes the emulated code “return”.
+Here is how it works today (the plugin's own code calls this "full"
+acceleration, in `pstepper_do_full_accel_upcall`). When acceleration is
+successfully activated (i.e., we verified identity mapping among other
+things), a genuine trap on an ordinary, non-syscall instruction skips the
+guest-side trampoline entirely, rather than single-stepping through its
+real-hardware GPR-save/`xsave`/ucontext-build dance under TCG just to
+reach the handler call at its end. The plugin builds the handler's
+`ucontext_t` itself, straight off the vCPU's live register file, in the
+guest's own upcall-stack memory (still just a host pointer, thanks to
+identity mapping); grabs the guest's TLS base; and calls the handler
+directly. When it returns, the plugin doesn't stage or redirect
+anything — it just lets the trapped instruction execute normally, right
+where it is.
 
-This approach has quite a few dangers, of course. First, the guest
-code could be an entirely different architecture than the host. More
-subtly, but more likely, the emulated CPU could have a slightly
-different set of extensions. E.g., on x86, QEMU doesn’t emulate
-`AVX-512`, but my CPU has it, and glibc likes to use it for memcpy. On
-ARM, the situation is reversed. The emulated CPU has those nice
-memory-copy instructions (MOPS) that aren't available on my actual
-Chromebook. Signal delivery during such accelerated upcalls is another
-area that asks for trouble. So some care is needed. We only start
-acceleration after at least a couple of instructions. This ensures
-that those possibly lazily resolved IFUNC functions use guest CPU
-capabilities. On ARM, the only workable approach is to manually pass
-the -cpu flag to QEMU so `memcpy()` has a chance of working at all.
+`syscall`/`svc` traps are the one exception and still take the slow
+trampoline path, since that is where thread creation (`clone`) and
+thread exit are detected and handled, and the plugin doesn't
+reimplement that logic.
+
+This approach has quite a few dangers, of course. The emulated CPU
+could have a slightly different set of extensions. E.g., on x86, QEMU
+doesn’t emulate `AVX-512`, but my CPU has it, and glibc likes to use
+it for memcpy. On ARM, the situation is reversed. The emulated CPU has
+those nice memory-copy instructions (MOPS) that aren't available on my
+actual Chromebook. Signal delivery during such accelerated upcalls is
+another area that asks for trouble. So some care is needed. We only
+start acceleration after at least a couple of instructions. This
+ensures that those possibly lazily resolved IFUNC functions use guest
+CPU capabilities. On ARM, the only workable approach is to manually
+pass the -cpu flag to QEMU so `memcpy()` has a chance of working at
+all.
 
 Still, even with those risks, fixing the speed problem is worth the
 trouble.

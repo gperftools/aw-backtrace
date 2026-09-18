@@ -147,6 +147,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <ucontext.h>
 
 #if __x86_64__
 #include <immintrin.h>
@@ -165,6 +166,14 @@ typedef enum {
 } Target;
 static Target g_target;
 
+#if __x86_64__
+const static Target g_native_target = TARGET_X86_64;
+#elif __aarch64__
+const static Target g_native_target = TARGET_AARCH64;
+#else
+#error Not supported yet
+#endif
+
 /* -plugin ...,omit_signal_masking=on -- see qemu_plugin_install(). */
 static bool g_omit_signal_masking;
 
@@ -179,6 +188,19 @@ typedef enum {
 	INSN_STORE_EXCL, /* stxr{,b,h,p} / stlxr{,b,h,p} -- closes the monitor */
 	INSN_CLREX,	 /* clrex -- also closes the monitor */
 } InsnKind;
+
+#if __x86_64__
+static const char *uc_greg_names[] = {"r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15",
+				      "rdi", "rsi", "rbp", "rbx", "rdx", "rax", "rcx"};
+#define UC_GREG_COUNT (sizeof(uc_greg_names) / sizeof(uc_greg_names[0]))
+#elif __aarch64__
+static const char *uc_greg_names[] = {"x0",  "x1",  "x2",  "x3",  "x4",	 "x5",	"x6",  "x7",  "x8",  "x9",  "x10",
+				      "x11", "x12", "x13", "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21",
+				      "x22", "x23", "x24", "x25", "x26", "x27", "x28", "x29", "x30"};
+#define UC_GREG_COUNT (sizeof(uc_greg_names) / sizeof(uc_greg_names[0]))
+#else
+#define UC_GREG_COUNT 0
+#endif
 
 /*
  * Classify one 32-bit A64 instruction word. Only the exclusive-access
@@ -254,9 +276,10 @@ typedef struct {
 	uint64_t excl_pc; /* PC of the ldxr that opened the current region */
 
 	struct qemu_plugin_register *reg_sp;
-	struct qemu_plugin_register *reg_third_arg; /* acceleration hook: real 3rd arg (ucontext_t*) */
-	struct qemu_plugin_register *reg_lr; /* link register for calls. Unused on x86 */
 	struct qemu_plugin_register *reg_tls_base;
+
+	// used by acceleration path to dump subset of ucontext for "direct upcall"
+	struct qemu_plugin_register *uc_greg_regs[UC_GREG_COUNT];
 } VcpuState;
 
 #define MAX_VCPUS 256
@@ -404,51 +427,99 @@ static void write_mem64(uint64_t vaddr, uint64_t v)
 
 typedef void (*callback_fn)(uintptr_t, uintptr_t, uintptr_t);
 
-long accelerated_calls;
+#if __x86_64__
+/*
+ * True iff the guest instruction at vaddr is `syscall` (opcode 0f 05)
+ * -- same opcode test as pstepper_amd64.c's
+ * pstepper_insn_is_syscall. Used only to exclude syscalls from
+ * pstepper_do_full_accel_upcall -- see its comment.
+ */
+static bool pstepper_vaddr_is_syscall(uint64_t vaddr)
+{
+	const unsigned char *p = (const unsigned char *)(uintptr_t)vaddr;
+	return p[0] == 0x0f && p[1] == 0x05;
+}
+#elif __aarch64__
+static bool pstepper_vaddr_is_syscall(uint64_t vaddr)
+{
+	uint32_t *p = (uint32_t *)(uintptr_t)vaddr;
+	return p[0] == 0xd4000001; // svc 0
+}
+#endif
+
+/*
+ * "Full" acceleration: skip the guest-side trampoline entirely for an
+ * ordinary (non-syscall) genuine trap, rather than staging [PC][SP] and
+ * single-stepping through the trampoline's real-hardware
+ * pushfq/GPR-save/xsave/fake-ucontext-build dance under TCG just to reach the
+ * `call pstepper_user_handler(...)` at its end. Build the fake ucontext_t
+ * directly here, from the vCPU's live register file, and call the handler
+ * natively right away.
+ *
+ * Excluded on purpose: any trapped `syscall` instruction.
+ * pstepper_amd64.c's pstepper_invoke_handler() intercepts a CLONE_THREAD
+ * clone(2) and a per-thread exit(2) *after* delivering the ordinary step
+ * upcall, entirely on the C side of the real plumbing -- logic this function
+ * does not reimplement. The caller checks this before ever getting here, so
+ * every syscall still takes the slow-but-correct trampoline path.
+ */
+static void pstepper_do_full_accel_upcall(VcpuState *st, uint64_t vaddr, uint64_t sp)
+{
+	ucontext_t *uc = (ucontext_t *)((uintptr_t)(st->upcall_stack_top - sizeof(ucontext_t)) & ~63UL);
+	static __thread __attribute__((tls_model("initial-exec"))) GByteArray *regs_buf;
+	if (!regs_buf) {
+		regs_buf = g_byte_array_sized_new(sizeof(uint64_t) * UC_GREG_COUNT);
+	}
+	g_byte_array_set_size(regs_buf, 0);
+	for (int i = 0; i < UC_GREG_COUNT; i++) {
+		qemu_plugin_read_register(st->uc_greg_regs[i], regs_buf);
+	}
 
 #if __x86_64__
-static
-uint64_t pstepper_invoke_acceleration(VcpuState *st, uint64_t vaddr)
-{
-	uint64_t sp = read_reg64(st->reg_sp);
-	uint64_t ret_addr = read_mem64(sp);
-	sp += 8;
-	uint64_t arg = read_reg64(st->reg_third_arg);
-	callback_fn fn = (callback_fn)vaddr;
-	accelerated_calls++;
+	memcpy(uc->uc_mcontext.gregs, regs_buf->data, regs_buf->len);
+	uc->uc_mcontext.gregs[REG_RSP] = sp;
+	uc->uc_mcontext.gregs[REG_RIP] = vaddr;
+	uc->uc_mcontext.fpregs = NULL;
+#elif __aarch64__
+	memcpy(uc->uc_mcontext.regs, regs_buf->data, regs_buf->len);
+	uc->uc_mcontext.sp = sp;
+	uc->uc_mcontext.pc = vaddr;
+#endif
 
+	callback_fn fn = (callback_fn)(uintptr_t)g_acceleration_pc;
+
+	sigset_t all;
+	sigset_t prev_mask;
+	if (!g_omit_signal_masking) {
+		sigfillset(&all);
+		if (pthread_sigmask(SIG_BLOCK, &all, &prev_mask)) {
+			die("failed to sigprocmask");
+		}
+	}
+
+#if __x86_64__
 	uint64_t tls_base = read_reg64(st->reg_tls_base);
 	uint64_t host_fsbase = _readfsbase_u64();
 	_writefsbase_u64(tls_base);
-	fn(1, 0, arg);
+	fn(PSTEPPER_UXI_STEP, 0, (uintptr_t)uc);
 	_writefsbase_u64(host_fsbase);
-
-	write_reg64(st->reg_sp, sp);
-	return ret_addr;
-}
 #elif __aarch64__
-static
-uint64_t pstepper_invoke_acceleration(VcpuState *st, uint64_t vaddr)
-{
-	uint64_t ret_addr = read_reg64(st->reg_lr);
-	uint64_t arg = read_reg64(st->reg_third_arg);
-	callback_fn fn = (callback_fn)vaddr;
-	accelerated_calls++;
 	uint64_t tls_base = read_reg64(st->reg_tls_base);
 	uint64_t host_tls;
-	asm volatile ("mrs %0, tpidr_el0\n\t"
-		      "msr tpidr_el0, %1"
-		      : "=r" (host_tls) : "r" (tls_base));
-	fn(1, 0, arg);
-	asm volatile ("msr tpidr_el0, %0" : : "r" (host_tls));
-	return ret_addr;
-}
-#else
-static void pstepper_invoke_acceleration(...)
-{
-	abort(); // bug/impossible
-}
+	asm volatile("mrs %0, tpidr_el0\n\t"
+		     "msr tpidr_el0, %1"
+		     : "=r"(host_tls)
+		     : "r"(tls_base));
+	fn(PSTEPPER_UXI_STEP, 0, (uintptr_t)uc);
+	asm volatile("msr tpidr_el0, %0" : : "r"(host_tls));
 #endif
+
+	if (!g_omit_signal_masking) {
+		if (pthread_sigmask(SIG_SETMASK, &prev_mask, NULL)) {
+			die("failed to sigprocmask");
+		}
+	}
+}
 
 static void pstepper_step_insn(unsigned int vcpu_index, uint64_t vaddr, InsnKind kind)
 {
@@ -472,45 +543,6 @@ static void pstepper_step_insn(unsigned int vcpu_index, uint64_t vaddr, InsnKind
 		set_gate(vcpu_index, GATE_ARMED);
 		write_reg64(st->reg_sp, st->resume_sp);
 		qemu_plugin_set_pc(st->resume_pc); /* noreturn */
-		g_assert_not_reached();
-	}
-
-	if (vaddr == g_acceleration_pc) {
-		if (!g_acceleration_enabled) {
-			return;
-		}
-		/*
-		 * pstepper_invoke_handler() already ran normally as ordinary guest
-		 * code (it is not intercepted -- only g_acceleration_pc itself,
-		 * pstepper_user_handler's entry, is) and already executed the real
-		 * `call pstepper_user_handler(PSTEPPER_UXI_STEP, NULL, &uc)`. So by
-		 * the time we land here the real SysV args are already in
-		 * registers: rdi=1, rsi=0, rdx=&uc (a genuine, already-built
-		 * ucontext_t on the guest's own upcall stack). We only need to read
-		 * rdx and call natively instead of letting TCG step through the
-		 * callee's body.
-		 */
-		sigset_t all;
-		sigset_t prev_mask;
-		int rv;
-		if (!g_omit_signal_masking) {
-			sigfillset(&all);
-			rv = pthread_sigmask(SIG_BLOCK, &all, &prev_mask);
-			if (rv) {
-			bug_sigprocmask:
-				die("failed to sigprocmask");
-			}
-		}
-
-		uint64_t ret_addr = pstepper_invoke_acceleration(st, vaddr);
-
-		if (!g_omit_signal_masking) {
-			rv = pthread_sigmask(SIG_SETMASK, &prev_mask, NULL);
-			if (rv)
-				goto bug_sigprocmask;
-		}
-
-		qemu_plugin_set_pc(ret_addr);
 		g_assert_not_reached();
 	}
 
@@ -580,10 +612,30 @@ static void pstepper_step_insn(unsigned int vcpu_index, uint64_t vaddr, InsnKind
 	}
 
 	/*
-	 * (4) Genuine trap. Stage [PC][SP] at the top of the upcall stack,
-	 * point SP there, set in_trap, and enter the trampoline.
+	 * (4) Genuine trap.
 	 */
 	uint64_t sp = read_reg64(st->reg_sp);
+
+	/*
+	 * "Full" acceleration: for an ordinary (non-syscall) instruction, skip
+	 * the guest-side trampoline entirely instead of staging [PC][SP] and
+	 * jumping into it. See pstepper_do_full_accel_upcall for why this is
+	 * safe and why syscalls are excluded. Steer straight back to the
+	 * trapped instruction afterward via the same resume_pc/resume_sp
+	 * protocol (2) above uses to let a resumed instruction through exactly
+	 * once -- nothing here ever staged a trampoline frame or moved the
+	 * guest's real RSP, so in_trap and the gate are left exactly as they
+	 * were (i.e. never parked at all).
+	 */
+	if (g_acceleration_enabled && !pstepper_vaddr_is_syscall(vaddr)) {
+		pstepper_do_full_accel_upcall(st, vaddr, sp);
+		return;
+	}
+
+	/*
+	 * Stage [PC][SP] at the top of the upcall stack, point SP there, set
+	 * in_trap, and enter the trampoline.
+	 */
 	uint64_t slot = st->upcall_stack_top - 16;
 	write_mem64(slot, vaddr);
 	write_mem64(slot + 8, sp);
@@ -667,11 +719,10 @@ static void pstepper_vcpu_tb_trans(struct qemu_plugin_tb *tb, void *userdata)
 		/* See GATE_* above: the resume marker has to be delivered while
 		 * a trap is parked, everything else only while armed. */
 		bool want_step = (g_resume_marker_pc != 0 && vaddr == g_resume_marker_pc);
-		want_step = want_step || (g_acceleration_pc != 0 && vaddr == g_acceleration_pc);
 		uint64_t gate_min = want_step ? GATE_PARKED : GATE_ARMED;
 
 		qemu_plugin_register_vcpu_insn_exec_cond_cb(insn, cb, QEMU_PLUGIN_CB_RW_REGS_PC, QEMU_PLUGIN_COND_GE,
-							   g_gate, gate_min, (void *)vaddr);
+							    g_gate, gate_min, (void *)vaddr);
 	}
 }
 
@@ -698,10 +749,10 @@ static void pstepper_enable_prot_exec(const char *guest_proc_maps)
 		if (maybe_x != 'x' || start_addr <= 0 || end_addr <= 0)
 			continue;
 
-		rv = mprotect((void *)start_addr, end_addr - start_addr,
-			      PROT_READ | PROT_EXEC);
+		rv = mprotect((void *)start_addr, end_addr - start_addr, PROT_READ | PROT_EXEC);
 		if (rv != 0) {
-			die("pstepper: mprotect(0x%lx, 0x%lx) PROT_EXEC failed: %s", start_addr, end_addr - start_addr, strerror(errno));
+			die("pstepper: mprotect(0x%lx, 0x%lx) PROT_EXEC failed: %s", start_addr, end_addr - start_addr,
+			    strerror(errno));
 		}
 		fprintf(stderr, "[pstepper] mprotect PROT_EXEC for host mapping of: %.*s\n", bytes_read - 1, s);
 	}
@@ -725,8 +776,8 @@ static bool vcpu_syscall_filter(unsigned int vcpu_index, int64_t num, uint64_t a
 		 * aarch64 only needs the AAPCS64 16. */
 		uint64_t align_mask = (g_target == TARGET_X86_64) ? 63 : 15;
 		if (a3 & align_mask) {
-			die("vcpu%u: upcall stack top 0x%" PRIx64 " is not %" PRIu64 "-byte aligned", vcpu_index,
-			    a3, align_mask + 1);
+			die("vcpu%u: upcall stack top 0x%" PRIx64 " is not %" PRIu64 "-byte aligned", vcpu_index, a3,
+			    align_mask + 1);
 		}
 		if (g_resume_marker_pc == 0) {
 			g_resume_marker_pc = a5;
@@ -737,13 +788,20 @@ static bool vcpu_syscall_filter(unsigned int vcpu_index, int64_t num, uint64_t a
 		}
 		if (g_target == TARGET_X86_64) {
 			st->reg_sp = find_reg("rsp");
-			st->reg_third_arg = find_reg("rdx");
 			st->reg_tls_base = find_reg("fs_base");
+#if __x86_64__
+			for (int i = 0; i < UC_GREG_COUNT; i++) {
+				st->uc_greg_regs[i] = find_reg(uc_greg_names[i]);
+			}
+#endif
 		} else {
 			st->reg_sp = find_reg("sp");
-			st->reg_third_arg = find_reg("x2");
 			st->reg_tls_base = find_reg("tpidr");
-			st->reg_lr = find_reg("x30");
+#if __aarch64__
+			for (int i = 0; i < UC_GREG_COUNT; i++) {
+				st->uc_greg_regs[i] = find_reg(uc_greg_names[i]);
+			}
+#endif
 		}
 		st->trampoline_pc = a2;
 		st->upcall_stack_top = a3;
@@ -787,7 +845,7 @@ static bool vcpu_syscall_filter(unsigned int vcpu_index, int64_t num, uint64_t a
 			fprintf(stderr, "[pstepper] cannot enable acceleration due to non-identity mapping\n");
 		}
 		/* a2 = enable/disable flag (a1 is the command number itself). */
-		g_acceleration_enabled = (g_identity_mapping == 1) && !!a2;
+		g_acceleration_enabled = (g_target == g_native_target) && (g_identity_mapping == 1) && !!a2;
 		if (g_acceleration_enabled && a3) {
 			pstepper_enable_prot_exec((const char *)a3);
 			fprintf(stderr, "[pstepper] stepping is accelerated!!! \\o/ !!!\n");
