@@ -343,7 +343,7 @@ static struct qemu_plugin_register *find_reg(const char *name)
 
 static GByteArray *scratch_u64()
 {
-	static __thread GByteArray *buf;
+	static __thread __attribute__((tls_model("initial-exec"))) GByteArray *buf;
 	if (!buf) {
 		buf = g_byte_array_sized_new(8);
 	}
