@@ -160,7 +160,7 @@ rule LINK_A
   command = rm -f $out && ar cr $out $in && ranlib $out
 
 rule OBJCOPY
-  command = objcopy -I binary -O #{BFD_ARCH} $in $out --rename-section .data=.rodata,alloc,load,readonly,data,contents
+  command = objcopy -I binary -O #{BFD_ARCH} $in $out --rename-section .data=.rodata,alloc,load,readonly,data,contents --add-section .note.GNU-stack=/dev/null --set-section-flags .note.GNU-stack=contents,readonly
 
 rule regenerate_build_files
   command = #{__FILE__}#{OVERRIDES}

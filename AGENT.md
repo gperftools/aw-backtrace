@@ -44,7 +44,12 @@ bzlmod, one top-level package, module `aw-backtrace`.
 bazel test ...:all
 bazel test -c opt ...:all        # NDEBUG: drops assert(), keeps CHECK()
 ./test-all-cfg.rb                # gcc/clang x dbg/opt sweep, all four green
+ci/run-stepped.rb                # the tagged tests inside qemu, actually stepping
 ```
+
+`test-all-cfg.rb` is now a one-liner around `ci/run-bazel.rb`, so the sweep you
+run by hand and the one CI runs are the same commands; `--cc=` / `--mode=` pick
+one configuration out of the four. The `ci/` scripts are their own part of §2.
 
 Traps worth knowing before you fight the build:
 
@@ -54,10 +59,10 @@ Traps worth knowing before you fight the build:
   rather than `copts` so it stays off the C compiles (`aw-addrcheck.c`). The
   public header is deliberately standard-agnostic — it compiles as C99 and as
   C++11 and up — so a consumer on an older standard can still include it.
-* **All internal headers are one target, `:internal`** (a `glob(["*.h"])`).
-  Every target that compiles C++ deps `:internal` and `#include`s whatever it
+* **All internal headers are one target, `:headers`** (a `glob(["*.h"])`).
+  Every target that compiles C++ deps `:headers` and `#include`s whatever it
   needs — there are no per-header libraries and no dependency-layering to keep
-  in sync. `:internal` carries no compile options (headers only), so it leaks
+  in sync. `:headers` carries no compile options (headers only), so it leaks
   nothing into a consumer; the `.cc` implementations still have their own
   targets. Two things stay out of the glob: `aw-addrcheck.h` (its own `:aw-
   addrcheck` C target, `exclude`d) and the public header (`:aw-backtrace-hdr`,
@@ -110,6 +115,41 @@ cross-capable, but the `sym_helper` blob is still objcopied with the *host*
 x86 blob into an aarch64 `.so` and fails. Native builds on either arch are
 fine.
 
+### `ci/` — what CI runs, and how to run it here
+
+`.github/workflows/ci.yml` is deliberately thin: every step is a ruby script
+under `ci/`, so the same thing runs on a GitHub runner, under `act` locally
+(`.actrc` pins the runner image), or straight on a developer box. Nothing in
+the yaml is worth debugging through a push cycle. Two jobs: the four-way
+`bazel` sweep (one matrix job per configuration) and `stepped`.
+
+* `ci/build-qemu.rb` — pinned upstream qemu (commit in the script) plus every
+  patch in `ci/qemu-patches/`, built linux-user-only into `~/qemu`. **The
+  patch there is not optional**: upstream's i386 translator only materializes
+  EIP and the lazy `cc_op` condition codes where it has a reason to, so a
+  plugin that reads registers or redirects execution at an arbitrary
+  instruction boundary sees stale EFLAGS — and three of `v/pstepper`'s tests
+  segfault. The workflow's cache key is a hash of the script *and* the
+  patches, so bumping either rebuilds.
+* `ci/check-pstepper.rb` — `v/pstepper`'s own suite under that qemu. Run first
+  in the job: seconds, no bazel, and if stepping itself is broken every
+  stepped test below fails less legibly.
+* `ci/install-bazelisk.rb` — `bazel` from the latest prebuilt bazelisk
+  release (curl), into `~/.local/bin`. `.bazelversion` then decides the release.
+* `ci/run-bazel.rb` — the sweep. `test-all-cfg.rb` is a one-liner around it.
+  It skips tests tagged `legacy` — today exactly `v/mini-x86-int`'s three,
+  see §3 for why — and `--with-legacy` puts them back.
+* `ci/run-stepped.rb` — builds the plugin with `v/pstepper`'s ninja, then
+  `bazel test --config=stepped --run_under=ci/qemu-stepper.rb <qemu> <plugin>`.
+
+**Why `--run_under` and not a bazel target:** the emulator and the plugin are
+built outside bazel (the plugin needs glib and qemu's plugin header), so
+neither is a bazel input — which is also why the config carries
+`--nocache_test_results`. A cached PASS would otherwise outlive a change to
+either one. The config changes nothing about the build, so the binaries are
+exactly what a plain `bazel test` produces; `tags = ["stepped"]` plus
+`--test_tag_filters` is what picks the comparer-hosting tests out.
+
 ### Two things about test configurations
 
 **Only `bazel test -c dbg` traps on unwinder diagnostics.** Non-`NDEBUG` builds
@@ -118,14 +158,23 @@ defined(NDEBUG) || defined(BUILD_SO)` opts out, so the preloadable `.so` never
 traps — it walks startup and libc code nobody will fix.
 
 **A comparer mismatch is a test failure — but only under qemu.** The comparer
-rides `v/pstepper` now, so a plain `bazel test` gets `pstepper_enable FAILED:
-Function not implemented`, passes, and compares nothing at all; nothing in
-`BUILD.bazel` or `test-all-cfg.rb` runs a test under qemu with the plugin, so
-that is every run of the default suite. §5 has the invocation that actually
-steps. When it *does* run, `aw-backtrace-test` sets `AW_BT_DIAG=0` (with
-`overwrite=0`, so your value wins) so the first unsuppressed diagnostic raises
-`SIGTRAP` and kills the process, in `-c opt` too. It also still sets
-`AW_BT_DIAG_VIA_CORE=1`, which nothing reads any more. Knobs in §5.
+rides `v/pstepper`, so a plain `bazel test` gets `pstepper_enable FAILED:
+Function not implemented`, passes, and compares nothing at all. That is still
+every run of the default suite; what runs the tests *stepping* is
+`--config=stepped`, i.e. `ci/run-stepped.rb` (§2, `ci/`), and §5 has the by-hand
+invocation.
+
+**The silent-pass hazard is what `AW_BT_REQUIRE_STEPPER=1` exists for.** The
+stepped config sets it, and then a missing stepper, or a run that exits having
+stepped zero instructions, is a hard failure (exit 91) instead of a green test
+that compared nothing — and any unsuppressed diagnostic fails the run at exit
+(exit 92) rather than only printing. It also *ignores* `AW_BT_DIAG`, so
+acceleration stays on and every diagnostic gets reported before the verdict;
+`AW_BT_DIAG` remains the interactive tool that stops at the first one. So
+`aw-backtrace-test`'s own `setenv("AW_BT_DIAG", "0", 0)` — which otherwise
+makes the first unsuppressed diagnostic raise `SIGTRAP`, in `-c opt` too — has
+no effect under CI's config. (It also still sets `AW_BT_DIAG_VIA_CORE=1`, which
+nothing reads any more.) Knobs in §5.
 Cache counters only exist when `AW_BUMP_STATS_IN_PRODUCTION` is defined —
 `genbuild.rb` defines it, Bazel does not.
 
@@ -245,7 +294,13 @@ Cache counters only exist when `AW_BUMP_STATS_IN_PRODUCTION` is defined —
   `EFLAGS.TF` plus an `SA_ONSTACK` `SIGTRAP` handler, i.e. the process steps
   itself, and the interpreter is a fast path that simulates runs of
   instructions to avoid a trap each. §4.7. Nothing in the comparer or in
-  `genbuild.rb` uses it any more; its own Bazel tests still run.
+  `genbuild.rb` uses it any more; its own Bazel tests still run, but they are
+  tagged `legacy` and CI skips them. The reason is worth knowing before
+  trusting this directory: the interpreter runs *real libc code*, so it is
+  sensitive to which libc it meets, and `test-signal-disable` segfaults
+  against Ubuntu 24.04's glibc 2.39 while passing on a Debian trixie box.
+  That is an unexplored interpreter coverage gap, not an environment
+  restriction — it reproduces with seccomp off, on identical hardware.
 
 ### Fuzzing and offline tooling
 
@@ -571,6 +626,15 @@ Before touching `BacktraceBuffer`:
   against the top of the *shadow stack* as well as the capture, so a
   once-reported pc that later appears as a return address silently skips that
   comparison too; and it saturates at 256 entries (saying so once).
+* **The suppressions need glibc's debug info installed**, which is easy to
+  miss because a dev box usually has it. They match by symbol *name*
+  (`_dl_fixup`, `call_init`, `__run_exit_handlers`), and two also match a
+  source filename — none of which is in glibc's dynamic symbol table. Without
+  debug info addr2line answers with the nearest exported symbol instead
+  (`_dl_fatal_printf` for the lazy-binding path on Ubuntu 24.04), every
+  suppression misses, and a lazy-binding truncation is reported as a real
+  mismatch. `ci/install-deps.rb` installs `libc6-dbg` for exactly this; a
+  report whose frames all read `(:0)` is the symptom.
 * **Signal delivery is modelled explicitly**, because it is the one control
   transfer that inserts frames without a `call`: the kernel builds an
   `rt_sigframe` and jumps at the handler. `TryRecognizeSignalEntry` spots that
@@ -823,6 +887,13 @@ should the outcome ever be routed back through `kOk`.
   RAII (§4.2).
 * Byte-pattern matching (PLT shapes, sigreturn trampolines, the DRAP `lea`) is
   compiler/linker-version fragile by nature.
+* **The `sym_helper` blob carries an explicit empty `.note.GNU-stack`**, added
+  by the `objcopy` in both `BUILD.bazel` and `genbuild.rb`. An
+  `objcopy -I binary` object has no such section, and a linker older than
+  binutils 2.43 reads that as "this program wants an executable stack" — so
+  everything linking the blob got `PT_GNU_STACK RWE`, with only a warning to
+  show for it. Newer binutils ignores the missing note, which is why this
+  survived so long.
 * History was squashed at the first public release, so there is no pre-release
   archaeology to do. Infer intent from `TODO`, `README.md` and this file.
 * **Debugging.** Run natively, nothing steps at all — `pstepper_enable` fails
@@ -837,6 +908,13 @@ should the outcome ever be routed back through `kOk`.
   for you to put a gdb breakpoint on, and it turns acceleration off so that
   breakpoint is in the process you are debugging rather than in qemu.
 * **Comparer knobs, all read once in `StartBacktraceComparer`**:
+  `AW_BT_REQUIRE_STEPPER=1` says this run is *supposed* to be stepping: no
+  pstepper underneath, or an exit having stepped zero instructions, kills the
+  process (exit 91) instead of passing silently, and any unsuppressed
+  diagnostic fails it at exit (exit 92). It ignores `AW_BT_DIAG` — see §2 — so
+  acceleration stays on and every diagnostic is reported before the verdict.
+  `ci/run-stepped.rb` sets it; `cjm` under a stepper is the one in-tree
+  program that makes it fire.
   `AW_BT_DIAG=N` means "act on the (N+1)-th unsuppressed diagnostic", where
   acting is `raise(SIGTRAP)` — for a debugger to catch, or for the default
   action to kill the process. The default is to report and keep going.
@@ -930,7 +1008,14 @@ True of the tree but not in `TODO`:
   all. Single-threaded correctness is now checked at least: the comparer's
   §4.8 cross-check re-captures with `disable_cache` and diffs, so a stale or
   wrong entry fails a test.
-* No CI, no sanitizer configs. The fuzzer (§3) is a crash-only oracle so far;
+* **CI covers the sweep and the stepped tests, not everything else.** §2's
+  `ci/` section:
+  four-configuration `bazel test` plus `ci/run-stepped.rb`, and pstepper's own
+  suite under the pinned qemu. Not covered: the `genbuild.rb` artifacts
+  (`backtrace-comparer.so`, `cjm`, `sym_helper_bin`) beyond what
+  `ci/run-stepped.rb` builds, the preload path against arbitrary binaries, the
+  fuzzer, aarch64, and any sanitizer configuration.
+* No sanitizer configs. The fuzzer (§3) is a crash-only oracle so far;
   the full-decoder wrong-answer cross-check and a hand-built CIE/FDE blob target
   (`eh-frame-reader-test.cc` is the unit-level beachhead) are still open, and it
   is not wired into any automated run.

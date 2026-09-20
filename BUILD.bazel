@@ -73,7 +73,14 @@ genrule(
           select({
               "@platforms//cpu:aarch64": "elf64-littleaarch64",
               "//conditions:default": "elf64-x86-64",
-          }) + " sym_helper_bin `basename $@` --rename-section .data=.rodata,alloc,load,readonly,data,contents",
+          }) + " sym_helper_bin `basename $@` --rename-section .data=.rodata,alloc,load,readonly,data,contents" +
+          # An `objcopy -I binary` object has no .note.GNU-stack, and a linker
+          # older than binutils 2.43 takes that to mean the whole program wants
+          # an executable stack -- silently, apart from a warning. Everything
+          # linking the blob then gets PT_GNU_STACK RWE. Add the empty note so
+          # the artifact is correct wherever it is linked.
+          " --add-section .note.GNU-stack=/dev/null" +
+          " --set-section-flags .note.GNU-stack=contents,readonly",
 )
 
 cc_library(
@@ -206,6 +213,11 @@ cc_test(
     # needed to prevent GNU ld crashes
     features = ["-supports_start_end_lib"],
     linkstatic = True,
+    # Hosts the comparer, so --config=stepped (ci/run-stepped.rb) runs it
+    # under qemu with the pstepper plugin, where it compares every
+    # instruction. A plain `bazel test` still runs it natively, where the
+    # comparer finds no stepper and stays out of the way.
+    tags = ["stepped"],
     deps = [
         ":aw-backtrace",
         ":headers",
@@ -267,6 +279,11 @@ cc_test(
     cxxopts = CXXOPTS,
     features = ["-supports_start_end_lib"],
     linkstatic = True,
+    # Hosts the comparer, so --config=stepped (ci/run-stepped.rb) runs it
+    # under qemu with the pstepper plugin, where it compares every
+    # instruction. A plain `bazel test` still runs it natively, where the
+    # comparer finds no stepper and stays out of the way.
+    tags = ["stepped"],
     deps = [
         ":aw-backtrace",
         "@lua",

@@ -140,6 +140,12 @@ struct SavedErrno {
 std::atomic<uint64_t> steps;
 std::atomic<uint64_t> return_buffer_pop_skips;
 
+// Unsuppressed diagnostics -- shadow-stack mismatches and cross-check
+// failures alike, i.e. every one that reached ActOnDiagnostic. Only
+// AW_BT_REQUIRE_STEPPER (below) reads it; without that it is just a number
+// in the exit report.
+std::atomic<uint64_t> diagnostics;
+
 // ---------------------------------------------------------------------------
 // The shadow call stack.
 //
@@ -391,6 +397,25 @@ std::atomic<intptr_t> stop_at_diag = INTPTR_MAX;
 // doubles the cost of every step, which is the only reason to want it off.
 bool cross_check_reference = true;
 
+// Exit codes for the two AW_BT_REQUIRE_STEPPER failures. Distinct from any
+// test framework's own so a CI log says which one happened.
+constexpr int kNoStepperExitCode = 91;
+constexpr int kDiagnosticsExitCode = 92;
+
+// AW_BT_REQUIRE_STEPPER=1: this run is *supposed* to be stepping, so anything
+// that would otherwise leave it silently comparing nothing is fatal -- no
+// pstepper underneath, or a process that exits having stepped zero
+// instructions. It also turns an unsuppressed diagnostic into a nonzero exit
+// status at the end of the run (see ReportAtExit).
+//
+// This exists because the failure it guards against is invisible: without a
+// plugin, pstepper_enable returns ENOSYS, every test passes, and nothing has
+// been compared at all. It is for automation -- a CI run sets it and lets
+// every diagnostic report before failing the run; AW_BT_DIAG is the
+// interactive tool, which stops at one. Setting this ignores AW_BT_DIAG
+// rather than fighting it, so acceleration stays on and the run finishes.
+bool require_stepper;
+
 volatile bool print_next_backtrace;
 
 // Set while pstepper is armed. Without it, StopBacktraceComparer would issue
@@ -445,6 +470,7 @@ int CaptureReferenceBacktrace(const ucontext_t* uc, std::span<void*> out) {
 
 // Return true if we want the code to repeat backtrace capturing for the debugging.
 bool ActOnDiagnostic() {
+  diagnostics.fetch_add(1, std::memory_order_relaxed);
   if (--stop_at_diag >= 0) {
     return false;
   }
@@ -466,6 +492,7 @@ void PrintStats() {
   }
 #endif
   DiagPrintf("Instructions stepped: %llu\n", (unsigned long long)steps.load(std::memory_order_relaxed));
+  DiagPrintf("Unsuppressed diagnostics: %llu\n", (unsigned long long)diagnostics.load(std::memory_order_relaxed));
   DiagPrintf("Return buffer return pop resync skips: %llu\n",
              (unsigned long long)return_buffer_pop_skips.load(std::memory_order_relaxed));
 }
@@ -740,12 +767,18 @@ void StartBacktraceComparer() {
 
   bool enable_acceleration = true;
 
+  require_stepper = (getenv("AW_BT_REQUIRE_STEPPER") != nullptr);
+
   if (const char* soft_break = getenv("AW_BT_BREAK_AT")) {
     ParseSoftBreakEnv(soft_break);
     // any diagnostics settings turn off default of enable_acceleration
     enable_acceleration = false;
   }
-  if (const char* stop_at_diag_s = getenv("AW_BT_DIAG")) {
+  // Deliberately not honoured under AW_BT_REQUIRE_STEPPER: there the run
+  // wants every diagnostic reported and the verdict at the end, not a
+  // SIGTRAP at the first one from a handler that -- with acceleration on --
+  // is running as host code inside qemu.
+  if (const char* stop_at_diag_s = getenv("AW_BT_DIAG"); stop_at_diag_s && !require_stepper) {
     enable_acceleration = false;
     stop_at_diag = atoi(stop_at_diag_s);
   }
@@ -761,6 +794,10 @@ void StartBacktraceComparer() {
   int err = pstepper_enable(StepperCallback, 128 << 10, (int)enable_acceleration);
   if (err != 0) {
     DiagPrintf("pstepper_enable FAILED: %s\n", strerror(err));
+    if (require_stepper) {
+      DiagPrintf("AW_BT_REQUIRE_STEPPER is set and there is no stepper -- nothing would be compared\n");
+      _exit(kNoStepperExitCode);
+    }
     return;
   }
   stepping_armed = true;
@@ -783,13 +820,37 @@ namespace {
 // Runs after the atexit(StopBacktraceComparer) above, so by here stepping is
 // already down; this is only the report. Nothing to say if we never stepped
 // anything -- which is every run without a pstepper implementation under it.
+//
+// Under AW_BT_REQUIRE_STEPPER it is also the verdict, and _exit is how it
+// delivers one: a destructor cannot make the process fail any other way, and
+// by here the test's own main() has long since returned its 0. That does
+// skip whatever destructors would have run after this one, which is fine --
+// the run has already failed.
 __attribute__((destructor)) void ReportAtExit() {
   StopBacktraceComparer();
-  if (steps.load(std::memory_order_relaxed) == 0) {
+  uint64_t stepped = steps.load(std::memory_order_relaxed);
+  if (stepped == 0) {
+    if (require_stepper) {
+      DiagPrintf("AW_BT_REQUIRE_STEPPER is set and not one instruction was stepped\n");
+      _exit(kNoStepperExitCode);
+    }
     return;
   }
   DiagPrintf("BacktraceComparer done!\n");
   PrintStats();
+
+  uint64_t bad = diagnostics.load(std::memory_order_relaxed);
+  if (require_stepper && bad != 0) {
+    if (getenv("AW_BT_CLANG_KNOWN_BUGS") != nullptr) {
+      DiagPrintf(
+          "So this would be failing test due to %llu unsuppressed diagnostic(s), but we're in CI and this not yet "
+          "fixed compiler\n",
+          (unsigned long long)bad);
+      return;
+    }
+    DiagPrintf("FAILED: %llu unsuppressed diagnostic(s)\n", (unsigned long long)bad);
+    _exit(kDiagnosticsExitCode);
+  }
 }
 
 }  // namespace
