@@ -35,6 +35,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/time.h>
+#include <time.h>
 
 #include "pstepper.h"
 
@@ -184,9 +185,33 @@ int main(void)
 	const int n = 3000;
 	double want = reference(n);
 
+	/*
+	 * Coverage needs a few ticks, one of them landing inside an upcall, and
+	 * how many a fixed amount of work collects depends on host load. So keep
+	 * running rounds of work until the conditions are met, capped so a
+	 * genuinely broken run still terminates.
+	 */
+	const double kMaxSeconds = 10.0;
+	struct timespec t0, t1;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	long rounds = 0;
+	int mismatches = 0;
+
 	fprintf(stderr, "[guest] arming pstepper\n");
 	pstepper_enable_or_die(handler, 65536, 0);
-	double got = compute(n);
+	for (;;) {
+		if (compute(n) != want) {
+			mismatches++;
+		}
+		rounds++;
+		if (mismatches || (g_sig_total >= 3 && g_sig_in_upcall >= 1)) {
+			break;
+		}
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		if ((double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9 > kMaxSeconds) {
+			break;
+		}
+	}
 	pstepper_disable();
 
 	struct itimerval off = {{0, 0}, {0, 0}};
@@ -195,10 +220,10 @@ int main(void)
 	fprintf(stderr, "[guest] steps=%ld  altstack steps=%ld  double deliveries=%ld\n", g_steps, g_steps_on_altstack,
 		g_double_deliveries);
 	fprintf(stderr, "[guest] signals: total=%ld  during upcall=%ld\n", g_sig_total, g_sig_in_upcall);
-	fprintf(stderr, "[guest] compute()=%a  reference=%a\n", got, want);
+	fprintf(stderr, "[guest] rounds=%ld  mismatches=%d\n", rounds, mismatches);
 
 	int fail = 0;
-	if (got != want) {
+	if (mismatches) {
 		fprintf(stderr, "[guest] FAIL: stepped result != native reference\n");
 		fail = 1;
 	}
