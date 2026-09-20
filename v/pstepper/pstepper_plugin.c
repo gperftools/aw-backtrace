@@ -744,17 +744,28 @@ static void pstepper_enable_prot_exec(const char *guest_proc_maps)
 		next_s = s + bytes_read;
 		if (perm_start + 3 >= bytes_read)
 			continue;
-		char maybe_x = s[perm_start + 2]; // s+perm_start is rwxp perm thingy
+		char maybe_w = s[perm_start + 1]; // s+perm_start is rwxp perm thingy
+		char maybe_x = s[perm_start + 2];
 		// qemu-user on x86 does vsyscall mapping which has high bit set
 		if (maybe_x != 'x' || start_addr <= 0 || end_addr <= 0)
 			continue;
 
-		rv = mprotect((void *)start_addr, end_addr - start_addr, PROT_READ | PROT_EXEC);
+		// Only ever *add* PROT_EXEC. An executable stack (rwxp) is listed
+		// here like any other executable range -- whether the guest gets one
+		// depends on its binary and its toolchain -- and forcing it to r-x
+		// makes every guest stack write fault. QEMU recovers each of those
+		// faults silently (that is its self-modifying-code path), so nothing
+		// fails: the guest just runs a few hundred times slower, drowning in
+		// SIGSEGV. Found as a ~500x slowdown of the stepped tests on a guest
+		// whose stack happened to be executable.
+		int prot = PROT_READ | PROT_EXEC | (maybe_w == 'w' ? PROT_WRITE : 0);
+		rv = mprotect((void *)start_addr, end_addr - start_addr, prot);
 		if (rv != 0) {
 			die("pstepper: mprotect(0x%lx, 0x%lx) PROT_EXEC failed: %s", start_addr, end_addr - start_addr,
 			    strerror(errno));
 		}
-		fprintf(stderr, "[pstepper] mprotect PROT_EXEC for host mapping of: %.*s\n", bytes_read - 1, s);
+		fprintf(stderr, "[pstepper] mprotect PROT_EXEC%s for host mapping of: %.*s\n",
+			(prot & PROT_WRITE) ? "|PROT_WRITE" : "", bytes_read - 1, s);
 	}
 }
 
