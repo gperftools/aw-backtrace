@@ -188,7 +188,14 @@ struct Arch {
     // PLT0 (The resolver header):
     // 0: ff 35 ... (pushq GOT+8(%rip))
     // 6: ff 25 ... (jmpq *GOT+16(%rip))
-    if (code[0] == 0xff && code[1] == 0x35 && code[6] == 0xff && code[7] == 0x25) {
+    //
+    // Both PLT0 and the IBT entries below may carry an MPX-era `bnd` (0xf2)
+    // prefix on their branches, e.g. Ubuntu 22.04's binutils 2.38 emits
+    // `f2 ff 25` / `f2 e9`. The prefix is part of the branch instruction,
+    // so the offsets we match on are unchanged.
+    auto skip_bnd = [&](int i) { return i + (code[i] == 0xf2); };
+
+    if (int j = skip_bnd(6); code[0] == 0xff && code[1] == 0x35 && code[j] == 0xff && code[j + 1] == 0x25) {
       if (slot_offset == 0) {
         return fill_sp_rel(16);
       }
@@ -209,19 +216,21 @@ struct Arch {
     // 00000000004025d0 <printf@plt>:
     // 4025d0:       f3 0f 1e fa             endbr64
     // 4025d4:       ff 25 66 73 36 00       jmp    *0x367366(%rip)        # 769940 <printf@GLIBC_2.2.5>
+    //
+    // With bnd prefix (Ubuntu 22.04) the branches are `f2 e9 ...` and
+    // `f2 ff 25 ...`.
 
     if (code[0] == 0xf3 && code[1] == 0x0f && code[2] == 0x1e && code[3] == 0xfa) {
       // 0xff 0x25 <offset> is rip-relative indirect jump: jmp *<offset>(%rip)
-      if (code[4] == 0xff && code[5] == 0x25) {
+      if (int j = skip_bnd(4); code[j] == 0xff && code[j + 1] == 0x25) {
         if (slot_offset == 0 || slot_offset == 4) {
-          info->cfa = CfaRule::SpRel(8);
-          return true;
+          return fill_sp_rel(8);
         }
         return false;
       }
       // 0x68 is push <32-bit literal>
       // 0xe9 is jump with 32-bit relative offset
-      if (code[4] == 0x68 && code[9] == 0xe9) {
+      if (code[4] == 0x68 && code[skip_bnd(9)] == 0xe9) {
         if (slot_offset == 9) {
           return fill_sp_rel(16);
         }
