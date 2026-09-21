@@ -29,6 +29,13 @@
 #include "check.h"
 #include "sym-helper-protocol.h"
 
+// MFD_EXEC is relatively newer feature. The value is well-known and
+// part of the ABI. But we might be building on older system. We
+// handle lack of MFD_EXEC support at runtime.
+#ifndef MFD_EXEC
+#define MFD_EXEC 0x0010U
+#endif
+
 extern "C" {
 extern const unsigned char _binary_sym_helper_bin_start[];
 extern const unsigned char _binary_sym_helper_bin_end[];
@@ -131,11 +138,7 @@ int CreateExecutableMemFDOrDie(const char* name, const unsigned char* data, size
   // Try to create an executable memory file.
   // Newer kernels (>= 6.3) support MFD_EXEC to explicitly mark the memfd as executable.
   // This is required if vm.memfd_noexec is set to 1.
-#ifdef MFD_EXEC
   int fd = memfd_create(name, MFD_CLOEXEC | MFD_EXEC);
-#else
-  int fd = -1;
-#endif
 
   if (fd < 0 && errno == EINVAL) {
     // Fallback for older kernels that don't understand MFD_EXEC
