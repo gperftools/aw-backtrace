@@ -170,6 +170,10 @@ struct Arch {
       return true;
     };
 
+    auto match_at = [&](size_t at, std::initializer_list<uint8_t> pattern) {
+      return memcmp(code + at, pattern.begin(), pattern.size()) == 0;
+    };
+
     // Classic PLT check:
     // 0: ff 25 ... (jmpq *GOT(%rip))
     // 6: 68 ...    (pushq $index)
@@ -220,7 +224,7 @@ struct Arch {
     // With bnd prefix (Ubuntu 22.04) the branches are `f2 e9 ...` and
     // `f2 ff 25 ...`.
 
-    if (code[0] == 0xf3 && code[1] == 0x0f && code[2] == 0x1e && code[3] == 0xfa) {
+    if (match_at(0, {0xf3, 0x0f, 0x1e, 0xfa})) {
       // 0xff 0x25 <offset> is rip-relative indirect jump: jmp *<offset>(%rip)
       if (int j = skip_bnd(4); code[j] == 0xff && code[j + 1] == 0x25) {
         if (slot_offset == 0 || slot_offset == 4) {
@@ -241,11 +245,143 @@ struct Arch {
       }
     }
 
-    // TODO: plt_rewrite feature produces one of this:
+    // MPX-style PLT (`ld -z bndplt` without IBT), lazy stub in .plt. Can be reproduced for inspection like this (on
+    // e.g. ubuntu 22.04 container):
     //
-    // * endbr64; jmp <rel32>
-    // * jmp <rel32>
-    // * jmpabs <abs64> ; jmpabs is new upcoming instruction
+    // cd v/pstepper
+    // LDFLAGS='-Wl,-z,bndplt' CFLAGS='-O2 -fcf-protection=none' ./genbuild.rb ninja
+    //
+    // 0: 68 ...    (push $index)
+    // 5: f2 e9 ... (bnd jmp PLT0)
+    // 11: 0f 1f 44 00 00 (nopl)
+    if (code[0] == 0x68 && code[skip_bnd(5)] == 0xe9) {
+      if (slot_offset == 5) {
+        // past push
+        return fill_sp_rel(16);
+      }
+      if (slot_offset == 0) {
+        return fill_sp_rel(8);
+      }
+      return false;
+    }
+
+    // ... and its .plt.sec, and GNU ld's non-lazy .plt.got. Their entries are
+    // only 8 bytes, so two per slot:
+    // 0: f2 ff 25 ... (bnd jmp *GOT(%rip)); 7: 90 (nop)   -- bnd flavor
+    // 0: ff 25 ...    (jmp *GOT(%rip));     6: 66 90      -- plain flavor
+    {
+      uintptr_t entry_offset = slot_offset & 8;
+      const uint8_t* entry = code + entry_offset;
+      bool bnd = entry[0] == 0xf2 && entry[1] == 0xff && entry[2] == 0x25 && entry[7] == 0x90;
+      bool plain = entry[0] == 0xff && entry[1] == 0x25 && entry[6] == 0x66 && entry[7] == 0x90;
+      if (bnd || plain) {
+        return slot_offset == entry_offset && fill_sp_rel(8);
+      }
+    }
+
+    bool has_extra_16b = (slot_start < slot_start + 32 && slot_start + 32 <= bounds.second);
+
+    // lld -z retpolineplt. The indirect jump is replaced by a call to a
+    // thunk that overwrites its own return address with the target and
+    // rets. Entries are 32 bytes (lazy) or 16 bytes (with -z now) and the
+    // header is 48 or 32 bytes, so we identify each 16-byte slot by content.
+    // See lld/ELF/Arch/X86_64.cpp, Retpoline and RetpolineZNow.
+    //
+    // The pcs below that are never executed architecturally (the pause/lfence
+    // loop the thunk's call "returns" to) are deliberately not matched.
+
+    // The thunk: 4c 89 1c 24 (mov %r11, (%rsp)); c3 (ret). Reached by a call,
+    // so the CFA is 16 here. (In the lazy variant it is also reachable from
+    // PLT0's own call, i.e. while resolving, where it is really 32. We can't
+    // tell those apart from the code bytes and go with the common case.)
+    if (match_at(0, {0x4c, 0x89, 0x1c, 0x24, 0xc3})) {
+      return (slot_offset == 0 || slot_offset == 4) && fill_sp_rel(16);
+    }
+    // -z now entry: mov GOT, %r11; jmp plt0
+    if (match_at(0, {0x4c, 0x8b, 0x1d}) && code[7] == 0xe9 && match_at(12, {0xcc, 0xcc, 0xcc, 0xcc})) {
+      return (slot_offset == 0 || slot_offset == 7) && fill_sp_rel(8);
+    }
+    // -z now header, first slot: call next; pause; lfence; jmp loop; int3...
+    if (match_at(0, {0xe8, 0x0b, 0, 0, 0, 0xf3, 0x90, 0x0f, 0xae, 0xe8, 0xeb, 0xf9})) {
+      return slot_offset == 0 && fill_sp_rel(8);
+    }
+    // lazy entry, first slot: mov GOT, %r11; call thunk; jmp loop
+    if (match_at(0, {0x4c, 0x8b, 0x1d}) && code[7] == 0xe8 && code[12] == 0xe9) {
+      return (slot_offset == 0 || slot_offset == 7) && fill_sp_rel(8);
+    }
+    // lazy entry, second slot (starts inside the previous jmp's rel32):
+    // 1: 68 idx (push); 6: e9 rel32 (jmp plt0); int3 padding
+    if (code[1] == 0x68 && code[6] == 0xe9 && match_at(11, {0xcc, 0xcc, 0xcc, 0xcc, 0xcc})) {
+      if (slot_offset == 1) {
+        // reached by the thunk's ret, same stack as entry
+        return fill_sp_rel(8);
+      }
+      if (slot_offset == 6) {
+        // past push
+        return fill_sp_rel(16);
+      }
+      return false;
+    }
+    // lazy header, first slot: push GOT+8; mov GOT+16, %r11; call next
+    if (has_extra_16b && code[0] == 0xff && code[1] == 0x35 && match_at(6, {0x4c, 0x8b, 0x1d}) &&
+        match_at(13, {0xe8, 0x0e, 0, 0, 0})) {  // rel32 spills into the next slot
+      if (slot_offset == 0) {
+        return fill_sp_rel(16);
+      }
+      if (slot_offset == 6 || slot_offset == 13) {
+        return fill_sp_rel(24);
+      }
+      return false;
+    }
+
+    // glibc's runtime PLT rewrite (tunable glibc.cpu.plt_rewrite, glibc >=
+    // 2.39; sysdeps/x86_64/dl-machine.h:x86_64_rewrite_plt). For objects
+    // linked `-z now -z mark-plt`, ld.so may, after relocation, overwrite an
+    // ordinary lazy-style .plt entry in place with a single direct branch:
+    //
+    //   [endbr64] e9 <rel32>        -- direct jmp, when the target is
+    //                                   within 32-bit reach (the common case)
+    //   [endbr64] d5 00 a1 <abs64>  -- jmpabs, APX-only, when it isn't
+    //                                   (JMPABS_INSN_OPCODE is emitted as
+    //                                   bytes d5 00 a1)
+    //
+    // endbr64 survives only if the object has IBT enabled. Either way there
+    // is no push and nothing else touches the stack before the branch, so
+    // cfa is sp+8 for the whole entry -- unlike every other shape above,
+    // there is no offset-dependent case here. Whatever's left of the entry
+    // is padded with int3 (0xcc); requiring that padding is what keeps this
+    // check (otherwise just "e9 + 4 bytes", a very generic pattern) from
+    // false-positiving on unrelated code.
+    //
+    // This still needs matching here, not left to fall through to the
+    // generic no-CFI guess: rewriting only ever touches executable bytes,
+    // never .eh_frame, so the *static* CFI describing this address is still
+    // elf_x86_64_eh_frame_lazy_plt's DW_CFA_def_cfa_expression -- i.e.
+    // LookupOutcome::kFailExpression, not kFail -- and skipping this check
+    // would head straight into the DRAP-or-refuse path instead of the guess.
+    //
+    // TODO: test it.
+    {
+      int at = match_at(0, {0xf3, 0x0f, 0x1e, 0xfa}) ? 4 : 0;
+      int end = -1;
+      if (code[at] == 0xe9) {
+        end = at + 5;
+      } else if (match_at(at, {0xd5, 0x00, 0xa1})) {
+        end = at + 11;
+      }
+      if (end >= 0) {
+        for (int i = end; i < 16; i++) {
+          if (code[i] != 0xcc)
+            goto not_plt_rewrite;
+        }
+        if (slot_offset == 0 || (uintptr_t)at == slot_offset) {
+          return fill_sp_rel(8);
+        }
+        return false;
+      }
+    not_plt_rewrite:
+        /* nop */;
+    }
 
     return false;
   }
