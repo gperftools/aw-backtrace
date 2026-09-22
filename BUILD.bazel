@@ -34,8 +34,6 @@ cc_library(
         ["*.h"],
         exclude = ["aw-addrcheck.h"],  # comes via :aw-addrcheck
     ),
-    # UnwindInfoCache uses 16-byte atomics; gcc and clang both call libatomic.
-    linkopts = ["-latomic"],
 )
 
 cc_library(

@@ -59,8 +59,7 @@ Traps worth knowing before you fight the build:
   nothing into a consumer; the `.cc` implementations still have their own
   targets. Two things stay out of the glob: `aw-addrcheck.h` (its own `:aw-
   addrcheck` C target, `exclude`d) and the public header (`:aw-backtrace-hdr`,
-  shipped under `aw-backtrace/` via `strip_include_prefix`). `:internal` also
-  carries `linkopts = ["-latomic"]`, so every C++ target gets it.
+  shipped under `aw-backtrace/` via `strip_include_prefix`).
 * **`.bazelrc` is for *this* workspace only.** It forces `-std=c++20` across the
   whole graph so abseil matches what `//perf-convert` compiles against. It does
   nothing for anyone depending on us.
@@ -73,10 +72,10 @@ Traps worth knowing before you fight the build:
   `features = ["-supports_start_end_lib"]` on the targets that hit it — a
   toolchain interaction, not a code bug. Copy the line onto any new binary
   target that starts crashing `ld`.
-* **`-latomic` is required for gcc *and* clang.** `UnwindInfoCache` uses 16-byte
-  atomics; without `-mavx -mcx16` both compilers call libatomic (~2.5ns/step
-  under clang). `ATTR_DWORD_ATOMICS`, which used to inline them, is deliberately
-  an empty macro — it emitted VEX unconditionally and `SIGILL`ed on pre-AVX.
+* **No libatomic, and keep it that way.** Nothing wider than 8 bytes is
+  atomic. `UnwindInfoCache` used 16-byte atomics until libatomic on aarch64
+  turned out to implement them with a lock table (§4.4); on x86-64 they cost a
+  libatomic call per step anyway, unless built with `-mavx -mcx16`.
 * **`v/mini-x86-int` is "vendored" only mechanically** — co-developed, same
   author, no upstream. A fix belonging in the stepper goes in the stepper.
   Its `BUILD.bazel` targets carry `includes = ["."]` so the sources' `base/…`
@@ -129,7 +128,7 @@ Cache counters only exist when `AW_BUMP_STATS_IN_PRODUCTION` is defined —
 | `backtrace-drap.h` | x86-64 only. Second minimal visitor for gcc's DRAP prologues (§4.3) |
 | `aw-structs.h` | the unwind model: `CfaRule`, `RegisterRule`, `FrameInfo`, `Cursor`, `CompressedFrameInfo` |
 | `aw-arch.h`, `aw-arch-x86_64.h`, `aw-arch-aarch64.h` | per-arch `struct Arch` with a fixed static interface. Adding an arch means implementing exactly that set |
-| `unwind-info-cache.h` | `UnwindInfoCache`: lock-free, fixed-size, bucketed, second-chance eviction (§4.4) |
+| `unwind-info-cache.h` | `UnwindInfoCache`: fixed-size, bucketed, per-bucket try-lock seqlock, second-chance eviction (§4.4) |
 | `aw-addrcheck.{h,c}` | async-signal-safe `/proc/self/maps` querying, `PROCMAP_QUERY` or snapshot+bsearch. Validates addresses before dereferencing |
 | `with-exit.h` | `WithExit::Run`/`Exit` — header-only `_setjmp`/`_longjmp` wrapper hiding the returns-twice. **Nothing runs on the way out**, no destructors |
 | `check.h` | `CHECK()`, unconditional (not `NDEBUG`-gated). For differential self-checks, never the capture path |
@@ -389,24 +388,33 @@ only make a byte matcher decline, never read past what the object declared.
 Anything not in the table — JIT, post-constructor `dlopen`, bare anonymous exec
 mappings — still goes to `aw-addrcheck`.
 
-**The whole entry is one 128-bit atomic** — 8 bytes key+flags, 8 bytes
-compressed `FrameInfo` — and the rest follows: no seqlock, no lock bit, no retry
-loop, because a reader can never catch a half-written value. The only cleanup is
-a duplicate-insert undo. Eviction is second-chance: an insert marks the other
-entries in its bucket, a hit clears its own mark, `Put` prefers free, then
-marked, then random.
+**A seqlock per bucket, and nothing wider than 64 bits.** An entry is two
+`atomic<uint64_t>`s: key+flags, and the compressed `FrameInfo` `bit_cast` to a
+word. The seqs are a table of their own, so a bucket stays exactly 128
+bytes, 128-aligned (two cache lines), at the price of a third line per lookup.
+A seq is a `uint32_t`: native everywhere, 32-bit targets included, and its
+wraparound is harmless (parity survives it; ABA takes 2³¹ writes to one bucket
+inside one read).
+It used to be one 16-byte atomic, with no lock at all; that died because
+libatomic on aarch64 — not even an old one — implements 16-byte atomics with a
+lock table, which is neither fast nor async-signal-safe.
 
-**Three constraints on edits here.** The entry must stay exactly 16 bytes with
-no padding — `compare_exchange` compares bitwise, so an indeterminate padding
-bit makes a CAS fail forever — hence anything added to the metadata comes out of
-the tag; the `alignas(16)` is load-bearing; and every function touching the
-table carries `ATTR_DWORD_ATOMICS` (a no-op today, kept for when it returns).
+**Nobody ever waits on the lock**, because a signal handler can interrupt a
+writer holding it and then look something up on the same thread. A `Put`
+try-locks and drops the insert if it can't get the bucket; a `Lookup` that sees
+the bucket locked is a miss, and it retries only when a writer came *and went*
+while it read. Only a hit is validated, since a miss is always acceptable. The
+one unlocked write is a hit clearing its entry's `pending_eviction` bit (an
+atomic `fetch_and`); readers ignore that bit, so it needs no seqlock. Eviction
+is second-chance: an insert marks the other entries in its bucket, a hit clears
+its own mark, and `Put` prefers free, then marked, then random.
+`dropped`/`retries` in `PrintStats` count the two ways the lock can cost
+something.
 
-`sizeof(...) == 8` does *not* enforce the first one: dropping a field leaves the
-byte behind as padding and the size assert still passes. That happened once.
-`static_assert(std::has_unique_object_representations_v<...>)` on
-`CompressedFrameInfo` is what actually catches it, which is why the struct
-carries an explicit `unused` member rather than a hole.
+`CompressedFrameInfo` still carries an explicit `unused` member rather than a
+padding hole, and `static_assert(std::has_unique_object_representations_v<...>)`
+enforces it. Nothing compares it bitwise any more, but `bit_cast` of a padding
+byte is still indeterminate.
 
 ### 4.5 The symbolizer daemon
 
@@ -785,9 +793,7 @@ complete/reliable/guessed; finishing and making permanent the `-Wconversion`
 cleanup; short-circuiting the walk into `_start`.
 
 On `-Wconversion` specifically: `bazel build --copt=-Wconversion :aw-backtrace`
-is down to three warnings — `unwind-info-cache.h`'s `uint64_t` → 62-bit `tag`
-bitfield (benign; `tag` is already masked, gcc can't see it) and two
-`-Wsign-conversion` in `aw-addrcheck.c`. Everything else in the core is clean.
+is down to two warnings, both `-Wsign-conversion` in `aw-addrcheck.c`. Everything else in the core is clean.
 
 True of the tree but not in `TODO`:
 
@@ -853,8 +859,6 @@ True of the tree but not in `TODO`:
   ioctl-disable setter, but that header is internal (only
   `include/aw-backtrace/aw-backtrace.h` is exported), so it is not a public API
   wart.
-* **`linkopts = ["-latomic"]` on `:internal` propagates to every consumer.** Fine
-  for a normal Bazel build, an integration wart for static links and non-glibc.
 * Naming mixes dashes and underscores (`function_ref.h`, `static_storage.h`,
   target `sym_helper_obj`…); new files go the dashed way.
 * No `make install`, no pkg-config, no CMake. Bazel or vendoring, for now.

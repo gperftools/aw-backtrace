@@ -926,7 +926,8 @@ class DebugExtensionImpl final : public DebugExtensionV0 {
     P(gets);
     P(puts);
     P(saves);
-    P(undos);
+    P(dropped);
+    P(retries);
 #undef P
     p(aw_backtrace_internal::fast_path_fallbacks, "fast_path_fallbacks");
     p(aw_backtrace_internal::fast_path_frames, "fast_path_frames");

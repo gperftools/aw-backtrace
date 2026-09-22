@@ -11,7 +11,7 @@ APPEND_CFLAGS = ENV['APPEND_CFLAGS'] || "-Iv/mini-x86-int -Imini-x86-int/base -I
 CFLAGS = [BASE_CFLAGS, APPEND_CFLAGS].join(' ')
 LDFLAGS = ENV['LDFLAGS'] || ''
 
-REQUIRED_LIBS = "-latomic"
+REQUIRED_LIBS = ""
 LIBS = [(ENV['LIBS'] || ''), REQUIRED_LIBS].join(' ')
 
 CC = ENV['CC'] || 'cc'
