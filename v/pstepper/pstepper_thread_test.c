@@ -64,14 +64,25 @@ static void gpregs_from_uc(pstepper_gpregs_t *out, const ucontext_t *uc)
 #endif
 }
 
-/* Is the trapped instruction a CLONE_THREAD clone(2) about to happen? */
+/* Is the trapped instruction a CLONE_THREAD clone(2) about to happen? Must
+ * confirm the opcode itself, not just rax/rdi -- rax happening to equal
+ * SYS_clone with rdi's CLONE_THREAD bit set is a coincidence plain arithmetic
+ * hits constantly across ~250k single-stepped main-thread instructions
+ * (rdi is a pointer virtually always, so PST_CLONE_THREAD's bit is set by
+ * pure chance on roughly half of them); without the opcode check this fires
+ * on some ordinary earlier instruction and captures garbage as the "parent
+ * clone regs" snapshot. Caught via a QEMU-plugin-side capture of the same
+ * frame (pstepper_do_clone_intercept's cf) disagreeing with this one. */
 static int uc_is_thread_clone(const ucontext_t *uc)
 {
 #if defined(__x86_64__)
 	const greg_t *g = uc->uc_mcontext.gregs;
-	return g[REG_RAX] == (greg_t)SYS_clone && ((uint64_t)g[REG_RDI] & PST_CLONE_THREAD);
+	const unsigned char *insn = (const unsigned char *)(uintptr_t)g[REG_RIP];
+	return insn[0] == 0x0f && insn[1] == 0x05 && g[REG_RAX] == (greg_t)SYS_clone &&
+	       ((uint64_t)g[REG_RDI] & PST_CLONE_THREAD);
 #elif defined(__aarch64__)
-	return uc->uc_mcontext.regs[8] == (unsigned long long)SYS_clone &&
+	const uint32_t *insn = (const uint32_t *)(uintptr_t)uc->uc_mcontext.pc;
+	return *insn == 0xd4000001u /* svc #0 */ && uc->uc_mcontext.regs[8] == (unsigned long long)SYS_clone &&
 	       (uc->uc_mcontext.regs[0] & PST_CLONE_THREAD);
 #else
 #error "no register accessors for this arch"
