@@ -107,20 +107,28 @@ struct Arch {
     if ((pc & 3) != 0) {
       return false;
     }
-    if (!InBounds(pc, 2 * sizeof(uint32_t), pc_bounds)) {
+    // Pattern: mov x8, #0x8b; svc #0
+    // 0xd2801168, 0xd4000001
+    auto check_match_at = [&](uintptr_t at) -> bool {
+      if (!InBounds(at, 2 * sizeof(uint32_t), pc_bounds)) {
+        return false;
+      }
+      const uint32_t* code = reinterpret_cast<const uint32_t*>(at);
+      return code[0] == 0xd2801168 && code[1] == 0xd4000001;
+    };
+
+    // Two positions to try, as on x86-64. pc at the entry is the frame
+    // reached by unwinding *into* the trampoline: the handler's `ret`
+    // goes there. pc at the `svc` is what a capture taken *while* the
+    // trampoline runs sees. sp is the same for both: the mov does not
+    // touch it. (pc - 4 wrapping is caught by InBounds' overflow check.)
+    if (!check_match_at(pc) && !check_match_at(pc - sizeof(uint32_t))) {
       return false;
     }
 
-    const uint32_t* code = reinterpret_cast<const uint32_t*>(pc);
-
-    // Pattern: mov x8, #0x8b; svc #0
-    // 0xd2801168, 0xd4000001
-    if (code[0] == 0xd2801168 && code[1] == 0xd4000001) {
-      // On arm64 Linux, ucontext is at sp + 128 (after siginfo)
-      *uc_loc = reinterpret_cast<const ucontext_t*>(sp + 128);
-      return true;
-    }
-    return false;
+    // On arm64 Linux, ucontext is at sp + 128 (after siginfo)
+    *uc_loc = reinterpret_cast<const ucontext_t*>(sp + 128);
+    return true;
   }
 
   static bool DetectPLTEntry(uintptr_t ip, FrameInfo* info, std::pair<uintptr_t, uintptr_t> bounds) {

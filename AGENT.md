@@ -27,10 +27,12 @@ The contract:
 * Modern Linux, glibc 2.35+ (`_dl_find_object`). x86-64 is where the testing
   is; aarch64 builds, passes the basic tests, and has both its own
   `GuessUnwindInfo` (§4.9) and the fast path (§4.8). The comparer's
-  machine-dependent half is split out behind `ComparerArch` (§4.6) and an
-  aarch64 implementation of it exists, but nothing has run it yet — so the
-  differential sweep (§4.10) is still aarch64's only working oracle. riscv
-  and 32-bit eventually.
+  machine-dependent half is split out behind `ComparerArch` (§4.6), and the
+  aarch64 implementation of it now runs: `ci/run-stepped.rb` on an arm64 box
+  steps `aw-backtrace-test` and `lua-test` under `qemu-aarch64` and they
+  pass. It has already found one real unwinder bug there (§4.6). It is
+  still thin coverage next to x86-64, and GitHub CI runs only on x86-64
+  runners. riscv and 32-bit eventually.
 
 ## 2. Build and test
 
@@ -241,7 +243,7 @@ Cache counters only exist when `AW_BUMP_STATS_IN_PRODUCTION` is defined —
 * `amd64-drap-test.{c,s}` — gcc 16 `-mforce-drap` output supplying
   `minimal_drap`; the pre-gcc-16 shape lives on as `minimal_drap_2` in
   `aw-backtrace-test.cc`.
-* **`fastpath-sweep-test.cc` — the fast path's only real oracle on
+* **`fastpath-sweep-test.cc` — the fast path's broadest oracle on
   aarch64.**  Sweeps every FDE of every module the test process has
   mapped, asks both `DoUnwindLookup` and `TryFastFrameInfo` about four
   pcs in each, and requires that wherever the fast path answers it
@@ -350,8 +352,9 @@ When the lookup produces nothing, a **fallback chain** runs in this
 order: PLT detection (leaf only; includes PLT0, the lazy-binding
 header, which on aarch64 moves sp by 16 before branching to the
 resolver) → signal-trampoline byte match (at the trampoline's entry or
-at its `syscall`, so a sample landing on that one instruction still
-unwinds) → DRAP (x86-64, and only if the failure was a CFI expression)
+at its `syscall` / `svc`, so a sample landing on that one instruction
+still unwinds — both arches, and §4.6 has what happened when aarch64
+only matched the entry) → DRAP (x86-64, and only if the failure was a CFI expression)
 → refuse outright if it was a CFI expression →
 `Arch::GuessUnwindInfo`. Everything in it that reads code bytes is
 bounds-checked against `AddrChecker::ExecutableBoundsFor()`, the DRAP
@@ -579,6 +582,15 @@ one piece of per-thread state is `ThreadState`.
 comparer is an independent oracle: if it borrowed the unwinder's idea of what
 a signal frame looks like, a wrong answer in `Arch::IsSignalFrame` would agree
 with itself and the test would pass.
+
+That independence has already caught a real bug. The aarch64
+`IsSignalFrame` matched `mov x8, #139; svc #0` only with pc on the `mov`.
+x86-64 had been fixed to match on the `syscall` too, and aarch64 had not.
+A step landing on the `svc` then missed the byte match and fell through to
+`GuessUnwindInfo`. x30 still held the trampoline address from the
+handler's `ret`, so the guess reported one spurious frame inside the
+trampoline. The comparer's own signal-entry model had the stack right, and
+the first aarch64 stepped run of `aw-backtrace-test` flagged the mismatch.
 
 **On aarch64 the model is identical and the reason is different.** An entry
 retires at `sp + 8` on x86-64 because `call` pushed the return address and
@@ -825,11 +837,12 @@ recovered frame is garbage.
 
 The fast path's whole contract is *agree with `DoUnwindLookup`, or fail*, and
 that is checkable without any of the machinery the comparer needs — which is
-the point, because the comparer is x86-64 only. `fastpath-sweep-test.cc` walks
+the point, because the comparer needs qemu and the stepper. `fastpath-sweep-test.cc` walks
 the `.eh_frame_hdr` search table of every loaded module for probe pcs, runs
-both decoders, and demands an exact `FrameInfo` match. It is the reason the
-aarch64 fast path can be trusted at all, and it is a better oracle for *this
-component* than the comparer is, on either arch.
+both decoders, and demands an exact `FrameInfo` match. It is most of the reason
+the aarch64 fast path can be trusted, since the comparer's per-step
+cross-check (§4.8) only sees the pcs its two stepped tests actually reach. It
+is a better oracle for *this component* than the comparer is, on either arch.
 
 One comparison is deliberately not exact, and it is an agreement rather than a
 divergence. `DW_CFA_undefined` on the RA column — the frames with nothing to
@@ -950,17 +963,19 @@ is down to two warnings, both `-Wsign-conversion` in `aw-addrcheck.c`. Everythin
 
 True of the tree but not in `TODO`:
 
-* **aarch64 builds and passes the tests, but is not release-ready** — the
-  comparer has never run there, and no CI. The old blocker is gone: the
-  sim-stepper was x86-only and `PSTATE.SS` is EL1-only, so the self-stepping
-  trick could not be ported, but `v/pstepper` steps from outside the guest and
-  has an arm64 port. What is left is wiring, not design — `ComparerArch`
-  (§4.6) has an aarch64 implementation that compiles and is otherwise
-  completely unexercised, `genbuild.rb` has no cross-compile support, and
-  `BUILD.bazel` still gates `:pstepper_plumbing` and `MAYBE_COMPARER` to
-  x86-64. Flipping those is the next step, and until something has actually
-  run, treat the aarch64 `ComparerArch` as a starting point rather than as
-  working code. What aarch64 does have now:
+* **aarch64 builds and passes the tests, including the stepped ones, but is
+  not release-ready.** The old blocker is gone: the sim-stepper was x86-only
+  and `PSTATE.SS` is EL1-only, so the self-stepping trick could not be ported,
+  but `v/pstepper` steps from outside the guest and has an arm64 port.
+  `BUILD.bazel` wires `:pstepper_plumbing` and `MAYBE_COMPARER` on aarch64,
+  and `ci/` handles arm64 (`qemu-aarch64`, the `-cpu cortex-a76` wart in
+  `ci/qemu-stepper.rb`). So `ci/run-stepped.rb` on an arm64 box runs the
+  aarch64 `ComparerArch` for real. Its first run found the trampoline bug
+  in §4.6. The remaining gaps are coverage. Only `aw-backtrace-test` and
+  `lua-test` are stepped there (the other `stepped` target,
+  `plt-shape-retpoline-lld-test`, is x86-64 only and `manual`), GitHub CI
+  has no arm64 runner, and `genbuild.rb` has no cross-compile support. What
+  aarch64 also has:
   `GuessUnwindInfo` (§4.9) with `arm64-leaf-test.cc` behind it, the fast path
   (§4.8), and the differential sweep (§4.10) holding the latter honest at
   ~43k probes and ~99% coverage in a gcc build (60% under clang, by design —
@@ -994,7 +1009,8 @@ True of the tree but not in `TODO`:
   suite under the pinned qemu. Not covered: the `genbuild.rb` artifacts
   (`backtrace-comparer.so`, `cjm`, `sym_helper_bin`) beyond what
   `ci/run-stepped.rb` builds, the preload path against arbitrary binaries, the
-  fuzzer, aarch64, and any sanitizer configuration.
+  fuzzer, aarch64 (the `ci/` scripts work on an arm64 box, but the workflow
+  has no arm64 runner), and any sanitizer configuration.
 * No sanitizer configs. The fuzzer (§3) is a crash-only oracle so far;
   the full-decoder wrong-answer cross-check and a hand-built CIE/FDE blob target
   (`eh-frame-reader-test.cc` is the unit-level beachhead) are still open, and it
