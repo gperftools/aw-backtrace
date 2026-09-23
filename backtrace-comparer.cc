@@ -589,6 +589,12 @@ bool ShouldSuppressMismatch(const ThreadState& ts, std::span<void* const> captur
           if (outcome.function == "_dl_fixup") {
             return true;
           }
+          if (outcome.function == "_dl_runtime_resolve") {
+            return true;
+          }
+          if (outcome.function == "__libc_arm_za_disable") {
+            return true;
+          }
           if (outcome.function == "call_init" && outcome.filename.find("libc-start.c") != std::string_view::npos) {
             return true;
           }
