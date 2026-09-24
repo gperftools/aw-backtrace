@@ -73,8 +73,7 @@ Traps worth knowing before you fight the build:
 * **`.bazelversion` pins 9.2.0.** If you ever re-introduce an override
   (`local_path_override` / `git_override`), note that `dev_dependency` belongs
   on the `bazel_dep` line only — 9.2.0 rejects it on the override and every
-  `bazel` invocation dies. (This is why `v/mini-x86-int` is a plain in-tree
-  package rather than an override.)
+  `bazel` invocation dies.
 * **GNU ld intermittently segfaults linking this package.** Worked around with
   `features = ["-supports_start_end_lib"]` on the targets that hit it — a
   toolchain interaction, not a code bug. Copy the line onto any new binary
@@ -83,11 +82,6 @@ Traps worth knowing before you fight the build:
   atomic. `UnwindInfoCache` used 16-byte atomics until libatomic on aarch64
   turned out to implement them with a lock table (§4.4); on x86-64 they cost a
   libatomic call per step anyway, unless built with `-mavx -mcx16`.
-* **`v/mini-x86-int` is "vendored" only mechanically** — co-developed, same
-  author, no upstream. A fix belonging in the stepper goes in the stepper.
-  Its `BUILD.bazel` targets carry `includes = ["."]` so the sources' `base/…`
-  quote-includes (and dependents' bare `#include "sim_stepper.h"`) resolve the
-  way they did when the directory was its own module root.
 * `:aw-backtrace` is the only public target and the only public header
   (`include/aw-backtrace/aw-backtrace.h`, via `strip_include_prefix`).
 * `with-exit.h` is header-only: `WithExit::Run`/`Exit` are a thin
@@ -137,8 +131,6 @@ the yaml is worth debugging through a push cycle. Two jobs: the four-way
 * `ci/install-bazelisk.rb` — `bazel` from the latest prebuilt bazelisk
   release (curl), into `~/.local/bin`. `.bazelversion` then decides the release.
 * `ci/run-bazel.rb` — the sweep. `test-all-cfg.rb` is a one-liner around it.
-  It skips tests tagged `legacy` — today exactly `v/mini-x86-int`'s three,
-  see §3 for why — and `--with-legacy` puts them back.
 * `ci/run-stepped.rb` — builds the plugin with `v/pstepper`'s ninja, then
   `bazel test --config=stepped --run_under=ci/qemu-stepper.rb <qemu> <plugin>`.
 
@@ -289,18 +281,6 @@ Cache counters only exist when `AW_BUMP_STATS_IN_PRODUCTION` is defined —
   loaded. Its own `README.md` has the four-layer design. The "acceleration"
   hack runs the handler as *host* code when guest and host arch match, which
   is why a `raise()` from a diagnostic behaves differently with it on (§5).
-* `v/mini-x86-int/` — the previous, x86-only stepper: partial x86-64
-  interpreter + `sim_stepper`. **No `ptrace` anywhere in it** — stepping is
-  `EFLAGS.TF` plus an `SA_ONSTACK` `SIGTRAP` handler, i.e. the process steps
-  itself, and the interpreter is a fast path that simulates runs of
-  instructions to avoid a trap each. §4.7. Nothing in the comparer or in
-  `genbuild.rb` uses it any more; its own Bazel tests still run, but they are
-  tagged `legacy` and CI skips them. The reason is worth knowing before
-  trusting this directory: the interpreter runs *real libc code*, so it is
-  sensitive to which libc it meets, and `test-signal-disable` segfaults
-  against Ubuntu 24.04's glibc 2.39 while passing on a Debian trixie box.
-  That is an unexplored interpreter coverage gap, not an environment
-  restriction — it reproduces with seccomp off, on identical hardware.
 
 ### Fuzzing and offline tooling
 
