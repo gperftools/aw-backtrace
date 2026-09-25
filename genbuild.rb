@@ -13,9 +13,7 @@ ARCH = case `#{CXX} -dumpmachine` or raise
          raise "unsupported architecture: #{`#{CXX} -dumpmachine`.chomp}"
        end
 
-maybe_march = if ARCH == :amd64 then " -march=haswell" else "" end
-
-BASE_CFLAGS = ENV['CFLAGS'] || "-ggdb3 -O2 -DNDEBUG -Wall -Wextra #{maybe_march}"
+BASE_CFLAGS = ENV['CFLAGS'] || "-ggdb3 -O2 -DNDEBUG -Wall -Wextra"
 APPEND_CFLAGS = ENV['APPEND_CFLAGS'] || "-Iinclude"
 # Nicer to have compile cmdline to start with BASE_CFLAGS and cruft
 # like includes later, but sometimes we need to be able to override
