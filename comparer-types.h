@@ -41,6 +41,4 @@ struct SignalDelivery {
 
 }  // namespace aw_backtrace_comparer
 
-
-
 #endif  // COMPARER_TYPES_H_

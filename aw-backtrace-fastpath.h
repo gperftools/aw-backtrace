@@ -218,9 +218,9 @@ struct FastPathFrame {
   // CFA offset as a plain magnitude: CFA is (SP or FP) + cfa_offset, with
   // kFlagFPBased picking which. Carries no tag bits.
   uint32_t cfa_offset;
-  // Bits 3+: magnitude of the CFA-relative slot the frame pointer was spilled
+  // Bits 2+: magnitude of the CFA-relative slot the frame pointer was spilled
   // to, i.e. FP is at CFA - (fp_offset & ~kFlagMask). Zero means the frame
-  // pointer is unchanged from the caller's. Bits 0-2 are the flags above.
+  // pointer is unchanged from the caller's. Bits 0-1 are the flags above.
   uint16_t fp_offset;
   // Magnitude of the CFA-relative slot the return address was spilled to: RA
   // is at CFA - ra_offset. Zero means "the architectural default rule", which

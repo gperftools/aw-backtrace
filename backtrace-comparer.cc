@@ -377,7 +377,9 @@ struct SuppressionCache {
 constinit SuppressionCache suppressions;
 
 // ---------------------------------------------------------------------------
-// Knobs, all read once in StartBacktraceComparer. See AGENT.md section 5.
+// Knobs, mostly read once in StartBacktraceComparer (AW_BT_DIAG_FILE is read
+// in EnsureDiagFD, AW_BT_CLANG_KNOWN_BUGS in ReportAtExit and
+// AW_BT_DONT_DROP_PRELOAD in the .so's constructor). See AGENT.md section 5.
 // ---------------------------------------------------------------------------
 
 pid_t orig_pid;
@@ -504,15 +506,13 @@ void PrintStats() {
 // A transfer classified on the previous step has now retired, so this is where
 // it lands on the shadow stack.
 //
-// `uc` and `sp` deliberately describe the *current* register file, and must
-// describe the same one as each other. There is one case where that is the
-// wrong one: a signal can be delivered at the instruction boundary right after
-// a call or a return, and by then sp points at the frame the kernel built, so
-// a return address resolved against it is garbage. The fix is to resolve
-// against the interrupted register file instead -- SignalDelivery carries it,
-// and EntryForRetiredCall takes the pair for exactly that reason -- but it has
-// never been caught happening, and getting it wrong corrupts the shadow stack
-// for good, so it stays unwritten rather than untested.
+// `uc` and `sp` must describe the register file the transfer retired into,
+// and the same one as each other. Normally that is the current one. The
+// exception is a signal delivered at the instruction boundary right after a
+// call or a return: by then sp points at the frame the kernel built, so a
+// return address resolved against it would be garbage. StepperCallback
+// handles that case by passing the interrupted register file from
+// SignalDelivery instead, which is why EntryForRetiredCall takes the pair.
 void ResolvePendingTransfer(ThreadState& ts, const ucontext_t* uc, uint64_t sp) {
   switch (ts.pending) {
     case ControlTransfer::kNone:

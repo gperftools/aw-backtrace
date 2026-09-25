@@ -192,7 +192,7 @@ struct Arch {
         continue;
       }
       const uint32_t* code = reinterpret_cast<const uint32_t*>(stp_addr);
-      if (code[0] != kStpX16X30PreIndex ||
+      if (code[0] != kStpX16X30PreIndex ||         // stp x16, x30, [sp, #-16]!
           (code[1] & 0x9f00001f) != 0x90000010 ||  // adrp x16
           (code[2] & 0xffc003ff) != 0xf9400211 ||  // ldr x17, [x16, #imm]
           (code[3] & 0xffc003ff) != 0x91000210 ||  // add x16, x16, #imm

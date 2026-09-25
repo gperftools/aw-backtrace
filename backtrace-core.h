@@ -33,13 +33,14 @@ enum class LookupOutcome {
   kFailExpression,
 };
 
-// `diag` covers every other way a lookup can fail (unsupported opcodes,
-// bogus registers, and the like) and is applied immediately, inside this
-// call. `expr_diag` applies only when the outcome is kFailExpression, so a
-// caller that wants to attempt recovery first can pass DiagFlags{} here and,
-// if recovery fails, call DoUnwindLookup again with real flags to get the
-// diagnostic reported (a second full lookup, but this path is already the
-// exceptional, off-the-fast-path case).
+// `diag` is applied immediately, inside this call, to every way a lookup can
+// fail (unsupported opcodes, bogus registers, and the like) -- except an
+// unsupported expression, which is reported only if
+// diag.report_expression_diag is set. That lets a caller attempt recovery
+// first (see the fallback chain in UnwindLoop) and, if recovery fails, call
+// DoUnwindLookup again with report_expression_diag to get the diagnostic
+// reported (a second full lookup, but this path is already the exceptional,
+// off-the-fast-path case).
 LookupOutcome DoUnwindLookup(uintptr_t lookup_ip, FrameInfo* info, DiagFlags diag);
 
 // The half of DoUnwindLookup below LocateEHFrame: runs the CFI decoder

@@ -6,8 +6,9 @@
 // The fast path's entire contract is "agree with DoUnwindLookup, or fail" --
 // it is an accelerator, never a behaviour change (see AGENT.md 4.7). That is
 // checkable without any of the stepping machinery the comparer needs, which
-// matters because the comparer is x86-64 only: walk every FDE of every loaded
-// module, ask both decoders about a handful of pcs in each, and require that
+// matters because the comparer only compares when run under qemu, and then
+// only over the pcs its tests happen to reach. Instead: walk every FDE of
+// every loaded module, ask both decoders about a handful of pcs in each, and require that
 // wherever the fast path answers at all it answers exactly what the slow path
 // does.
 //
