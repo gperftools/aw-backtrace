@@ -4,7 +4,7 @@
 // Differential sweep of the fast-path CFI decoder against the full one.
 //
 // The fast path's entire contract is "agree with DoUnwindLookup, or fail" --
-// it is an accelerator, never a behaviour change (see AGENT.md 4.8). That is
+// it is an accelerator, never a behaviour change (see AGENT.md 4.7). That is
 // checkable without any of the stepping machinery the comparer needs, which
 // matters because the comparer is x86-64 only: walk every FDE of every loaded
 // module, ask both decoders about a handful of pcs in each, and require that
@@ -187,7 +187,7 @@ TEST(FastPathSweep, AgreesWithFullDecoder) {
   // pattern-match; what this catches is a change that breaks it wholesale.
   //
   // The floor is compiler-dependent because the fast path pins the CIE
-  // alignment factors to what gas emits (see AGENT.md 4.8): on aarch64 clang
+  // alignment factors to what gas emits (see AGENT.md 4.7): on aarch64 clang
   // instead emits code_align 1 / data_align -4, so every clang-built object
   // in the corpus -- which, in a clang build, includes gtest and the test
   // binary itself, a good third of the probes -- takes the slow path by
@@ -196,7 +196,7 @@ TEST(FastPathSweep, AgreesWithFullDecoder) {
   double coverage_pct = (double)fast_ok / (double)probes * 100;
 #if defined(__clang__) && defined(__aarch64__)
   printf(
-      "This clang and aarch64. As of this writing this is \"broken\" in a sense "
+      "This is clang and aarch64. As of this writing this is \"broken\" in a sense "
       "of them producing wildly inefficient code and data aligns. "
       "Instead of adapting fast-path to this nonsensical case, we adapt the test.\n");
 #else

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #ifndef RENAMINGS_H_
 #define RENAMINGS_H_
 

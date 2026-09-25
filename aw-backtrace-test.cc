@@ -183,7 +183,6 @@ int main(int argc, char** argv) {
 
   if (argc < 2 || std::string_view{argv[1]} != "--nocompare") {
     setenv("AW_BT_DIAG", "0", 0);
-    setenv("AW_BT_DIAG_VIA_CORE", "1", 0);
     StartBacktraceComparer();
   }
 #endif  // !BT_USE_SIMPLE

@@ -359,8 +359,6 @@ struct Arch {
     // elf_x86_64_eh_frame_lazy_plt's DW_CFA_def_cfa_expression -- i.e.
     // LookupOutcome::kFailExpression, not kFail -- and skipping this check
     // would head straight into the DRAP-or-refuse path instead of the guess.
-    //
-    // TODO: test it.
     {
       int at = match_at(0, {0xf3, 0x0f, 0x1e, 0xfa}) ? 4 : 0;
       int end = -1;

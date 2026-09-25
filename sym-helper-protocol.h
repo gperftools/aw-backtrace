@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #ifndef SYM_HELPER_PROTOCOL_H_
 #define SYM_HELPER_PROTOCOL_H_
 #include <stddef.h>

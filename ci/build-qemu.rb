@@ -44,11 +44,8 @@ CONFIGURE_FLAGS = %w[
   --disable-werror
 ]
 
-# Applied on top of QEMU_COMMIT, in name order. Not optional: without
-# 0001-i386-gdbstub-tcg-eflags.patch two of v/pstepper's tests segfault,
-# because the plugin's register reads and writes go through the i386
-# gdbstub accessors, which do not fold TCG's lazily tracked condition
-# codes. Each patch's own header says what it is for.
+# Applied on top of QEMU_COMMIT, in name order. As of now we carry one
+# patch required for x86 correctness.
 PATCHES = Dir[File.join(__dir__, 'qemu-patches', '*.patch')].sort
 
 force = ARGV.delete('--force')
