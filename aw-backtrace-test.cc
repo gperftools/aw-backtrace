@@ -117,8 +117,54 @@ bool seen_sigill;
 extern "C" {
 int minimal_drap(void (*fn)(int*));
 int minimal_drap_2(void (*fn)(int*));
+int drap_saved_regs(void (*fn)(int*));
+int drap_many_regs(void (*fn)(int*));
+int drap_r13_nested(void (*fn)(int*));
+int drap_r13_ncsr(void (*fn)(int*));
 int drap_test_trampoline(decltype(minimal_drap) test_fn, void (*arg)(int*));
+// Return address of drap_test_trampoline's call into the DRAP function.
+extern const char drap_test_trampoline_ret[];
 }
+
+#if __x86_64__ && !BT_USE_SIMPLE
+// CheckDRAPBacktrace counts backtraces taken from inside a DRAP function's
+// callee that did or did not get through the DRAP frame and reach
+// drap_test_trampoline. Without this, a plain (non-stepped) run checks only
+// that the DRAP functions return the right value, which they do even if we
+// cannot unwind through them.
+int drap_bt_good;
+int drap_bt_bad;
+
+void ResetDRAPCheck() {
+  drap_bt_good = drap_bt_bad = 0;
+}
+
+bool DRAPCheckOk() {
+  return drap_bt_good > 0 && drap_bt_bad == 0;
+}
+
+void CheckDRAPBacktrace() {
+  std::array<void*, kBtSize> buf;
+  int count = aw_backtrace(nullptr, buf.data(), buf.size(), 0);
+  bool ok = false;
+  for (int i = 0; i < count; i++) {
+    if (buf[i] == static_cast<const void*>(drap_test_trampoline_ret)) {
+      ok = true;
+    }
+  }
+  if (ok) {
+    drap_bt_good++;
+    return;
+  }
+  if (drap_bt_bad++ == 0) {
+    printf("DRAP backtrace (%d frames) did not reach drap_test_trampoline_ret = %p:\n", count,
+           static_cast<const void*>(drap_test_trampoline_ret));
+    for (int i = 0; i < count; i++) {
+      printf("  %d: %p\n", i, buf[i]);
+    }
+  }
+}
+#endif  // __x86_64__ && !BT_USE_SIMPLE
 
 // macro because we cannot afford an extra function frame
 #define DO_BT(fn, uc, buf, res, ...)                                     \
@@ -224,21 +270,78 @@ int main(int argc, char** argv) {
 #if __x86_64__
   // test drap bits. See doc/amd64-drap-problem.adoc.
   {
+    ResetDRAPCheck();
     int res = drap_test_trampoline(minimal_drap, [](int* p) -> void {
       *p = 41;
-      *p += minimal_drap([](int* p) -> void { *p = 1; });
+      *p += minimal_drap([](int* p) -> void {
+        CheckDRAPBacktrace();
+        *p = 1;
+      });
     });
-    printf("drap test result value %d (need 42)\n", res);
-    all_ok = all_ok & (res == 42);
+    printf("drap test result value %d (need 42), backtrace %s\n", res, DRAPCheckOk() ? "ok" : "BAD");
+    all_ok = all_ok & (res == 42) & DRAPCheckOk();
 
-    // Same as above but exercises minimal_drap_2 doesn't have which does not have
-    //  .cfi_restore fix at the epilogue (it was fixed in gcc 16)
+    // Same as above but with minimal_drap_2, whose epilogue lacks the
+    // .cfi_restore for %rbp, as gcc's does when the stack is realigned to
+    // 64 bytes or less.
+    ResetDRAPCheck();
     res = drap_test_trampoline(minimal_drap_2, [](int* p) -> void {
       *p = 41;
-      *p += minimal_drap_2([](int* p) -> void { *p = 1; });
+      *p += minimal_drap_2([](int* p) -> void {
+        CheckDRAPBacktrace();
+        *p = 1;
+      });
     });
-    printf("drap test 2 result value %d (need 42)\n", res);
-    all_ok = all_ok & (res == 42);
+    printf("drap test 2 result value %d (need 42), backtrace %s\n", res, DRAPCheckOk() ? "ok" : "BAD");
+    all_ok = all_ok & (res == 42) & DRAPCheckOk();
+
+    // drap_saved_regs (amd64-drap-regs-test.s) also saves callee-saved
+    // registers in the DRAP frame, so %r10 lands at -16(%rbp), not -8, and
+    // %rbx/%r12 get DW_CFA_expression rules. gperftools'
+    // MallocBlock::ProcessFreeQueue has this prologue with -march=x86-64-v3
+    // (the default on Ubuntu 26.04's amd64v3 variant), though its epilogue
+    // lacks the .cfi_restore for %rbp, as it is realigned only to 32 bytes.
+    ResetDRAPCheck();
+    res = drap_test_trampoline(drap_saved_regs, [](int* p) -> void {
+      CheckDRAPBacktrace();
+      *p = 21;
+    });
+    printf("drap test 3 (saved regs) result value %d (need 42), backtrace %s\n", res, DRAPCheckOk() ? "ok" : "BAD");
+    all_ok = all_ok & (res == 42) & DRAPCheckOk();
+
+    // The rest are from amd64-drap-variants-test.s.
+
+    // All five callee-saved registers in the DRAP frame: %r10 at -40(%rbp).
+    ResetDRAPCheck();
+    res = drap_test_trampoline(drap_many_regs, [](int* p) -> void {
+      CheckDRAPBacktrace();
+      *p = 7;
+    });
+    printf("drap test 4 (many regs) result value %d (need 42), backtrace %s\n", res, DRAPCheckOk() ? "ok" : "BAD");
+    all_ok = all_ok & (res == 42) & DRAPCheckOk();
+
+    // %r13 as the DRAP register, in a nested function (the static chain
+    // occupies %r10). The DRAP frame is the nested function, called from
+    // drap_r13_nested, which is an ordinary frame.
+    ResetDRAPCheck();
+    res = drap_test_trampoline(drap_r13_nested, [](int* p) -> void {
+      CheckDRAPBacktrace();
+      *p = 42;
+    });
+    printf("drap test 5 (r13, nested function) result value %d (need 42), backtrace %s\n", res,
+           DRAPCheckOk() ? "ok" : "BAD");
+    all_ok = all_ok & (res == 42) & DRAPCheckOk();
+
+    // %r13 as the DRAP register in a no_caller_saved_registers function, which
+    // also saves %r10 and the caller-saved registers via DW_CFA_expression.
+    ResetDRAPCheck();
+    res = drap_test_trampoline(drap_r13_ncsr, [](int* p) -> void {
+      CheckDRAPBacktrace();
+      *p = 42;
+    });
+    printf("drap test 6 (r13, no_caller_saved_registers) result value %d (need 42), backtrace %s\n", res,
+           DRAPCheckOk() ? "ok" : "BAD");
+    all_ok = all_ok & (res == 42) & DRAPCheckOk();
   }
 #endif  // __x86_64__
 #endif  // !BT_USE_SIMPLE
@@ -268,7 +371,7 @@ int main(int argc, char** argv) {
 // DRAP sets up "fake" stack frame, so general GuessUnwindInfo will be
 // able to correctly restore caller's RIP and RBP (after fake frame is
 // setup). But not RSP. Such mismatch will only fail tests if
-// minimal_drap{,_2} caller is using RSP-offset-based frame layout. To
+// minimal_drap{,_2} or drap_saved_regs caller is using RSP-offset-based frame layout. To
 // force that we have special hand-coded asm. Otherwise main() could
 // well be compiled with -fno-omit-frame-pointer and "pass" even with
 // broken DRAP detection logic.
@@ -285,13 +388,19 @@ __attribute__((naked)) int drap_test_trampoline(decltype(minimal_drap) /* test_f
         mov %rsi, %rbp
         .cfi_offset 6, -24
         call *%rsi
+        .globl drap_test_trampoline_ret
+        .hidden drap_test_trampoline_ret
+drap_test_trampoline_ret:
         add $24, %rsp
         .cfi_def_cfa 7, 8
         mov -16(%rsp), %rbp
         ret
 )");
 }
-// same as amd64-drap-test.s but without .cfi_restore 6 fix from gcc 16
+// Same as amd64-drap-test.s but without the .cfi_restore 6 in the epilogue.
+// That is what gcc emits when the stack is realigned to 64 bytes or less
+// (amd64-drap-test.c realigns to 4096). See
+// https://gcc.gnu.org/bugzilla/show_bug.cgi?id=128270
 __attribute__((naked)) int minimal_drap_2(void (*)(int*)) {
   asm volatile(R"(
 	leaq	8(%rsp), %r10	#,

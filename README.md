@@ -73,8 +73,9 @@ shipping, I became quite convinced that DWARF isn't the problem people
 think it is. aw-backtrace implements a subset of DWARF which is
 slightly richer than what is assumed by ORC or SFrame. Common
 unsupported cases (e.g., GNU ld puts smart DWARF expressions
-describing PLT entries, or occasional DRAP, or signal frames) are
-handled by dedicated heuristics. I've swept my own machine for cases
+describing PLT entries, or signal frames) are handled by dedicated
+heuristics. For amd64 DRAP frames we interpret the couple of DWARF
+expression shapes gcc emits for them. I've swept my own machine for cases
 that need more DWARF than is currently supported, and there are only a
 few such FDEs, mostly in "leaf functions", so shouldn't compromise CPU
 profiles too much and should not affect other cases at all (e.g.,
@@ -341,10 +342,6 @@ async-signal-safe context are:
 * `aw-addrcheck.{c.h}` -- locating VMA bounds.
 * `aw-backtrace.cc` the main thing that wires up everything and
   provides "public" API and some diagnostics.
-* `backtrace-drap.h` -- specialized "visitor" for eh-frame-reader that
-  knows how to recognize FrameInfo for x86 DRAP functions. See
-  `doc/amd64-drap-problem.adoc`. Chances are, you've never heard of
-  DRAP. In that case, I suggest you ignore this part.
 * `with-exit.h` -- header-only non-local exits: a thin `_setjmp`/`_longjmp`
   wrapper (`WithExit::Run`/`Exit`) that hides the returns-twice from callers.
 
@@ -401,7 +398,7 @@ check with no-cache/no-fast-path backtraces.
 Mentioning only particularly notable parts:
 
 * aw-backtrace-test.cc -- main test which does basics and exercises
-  backtrace-comparer. Also tests the DRAP thing in `amd64-drap-test.s`
+  backtrace-comparer. Also tests the DRAP thing in `amd64-drap-*test.s`
 * lua-test.cc -- runs lua parser and compiler through
   backtrace-comparer.
 * `simple-fp-backtrace.{h,cc}` -- the straightforward frame-pointer-based
