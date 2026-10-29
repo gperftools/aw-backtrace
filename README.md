@@ -182,7 +182,7 @@ microbenchmark, libgcc is about 5x slower. LLVM's libunwind is another
 safety. Unlike, e.g., libgcc, we won't crash the process on wrong
 unwind info.
 
-See recursion-test.cc for more details.
+See tests/recursion-test.cc for more details.
 
 Here is what I get:
 
@@ -350,8 +350,8 @@ possible to follow/inspect.
 
 ### Backtrace comparer
 
-Note: backtrace comparer is used by some tests: aw-backtrace-test and
-lua-test (built and exercised by bazel; but they only compare when run
+Note: backtrace comparer is used by some tests: aw-backtrace-test,
+amd64-drap-test and lua-test (built and exercised by bazel; but they only compare when run
 under qemu with plugin; see `test-all-cfg.rb` below), and by
 ./genbuild.rb, which produces LD_PRELOAD-able .so. As noted above,
 single-stepping callback tracks real call stack (modulo non-local
@@ -395,10 +395,12 @@ check with no-cache/no-fast-path backtraces.
 
 ### Testing/benchmarking
 
-Mentioning only particularly notable parts:
+Mentioning only particularly notable parts (tests live in `tests/`):
 
 * aw-backtrace-test.cc -- main test which does basics and exercises
-  backtrace-comparer. Also tests the DRAP thing in `amd64-drap-*test.s`
+  backtrace-comparer.
+* amd64-drap-test.cc -- unwinding through gcc's DRAP frames, using the
+  gcc output in `tests/drap/`. See doc/amd64-drap-problem.adoc.
 * lua-test.cc -- runs lua parser and compiler through
   backtrace-comparer.
 * `simple-fp-backtrace.{h,cc}` -- the straightforward frame-pointer-based

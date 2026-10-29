@@ -41,7 +41,7 @@ bazel test -c opt ...:all        # NDEBUG: drops assert(), keeps CHECK()
 
 For each of the four configurations, `test-all-cfg.rb` first runs a plain
 `bazel test ...:all`. It then reruns the `stepped`-tagged targets
-(`aw-backtrace-test`, `lua-test`) with
+(`aw-backtrace-test`, `amd64-drap-test`, `lua-test`) with
 `--run_under="qemu-$(uname -m) -plugin v/pstepper/pstepper_plugin.so"`,
 `AW_BT_REQUIRE_STEPPER=1` and `--test_output=all`. It needs:
 
@@ -174,10 +174,13 @@ defines it; Bazel does not. The `RuntimeDiag` path always bumps them, so
 
 ### Tests
 
+All tests and their fixtures live in `tests/`; the targets are still in the
+top-level `BUILD.bazel`.
+
 * `aw-backtrace-test.cc` is the main end-to-end test and hosts the comparer. It
   captures from a SIGILL handler and checks that walking *through* the signal
   frame without a `ucontext` lands in the same place. That is the direct test
-  of `Arch::IsSignalFrame`. It also hosts the DRAP fixtures. A second build,
+  of `Arch::IsSignalFrame`. A second build,
   `simple-backtrace-test` (`BT_USE_SIMPLE`), runs the same source against
   `simple-fp-backtrace`.
 * `lua-test.cc` runs the comparer over the Lua compiler to get varied real
@@ -192,14 +195,15 @@ defines it; Bazel does not. The `RuntimeDiag` path always bumps them, so
   them. glibc's `backtrace()` gives up on these frames, so the fixtures export
   their own expected addresses. The `paciasp` fixture has no effect without
   FEAT_PAuth.
-* `amd64-drap-test.{c,s}` is gcc `-mforce-drap` output (`minimal_drap`). It
-  realigns to 4096 bytes, so its epilogue has `.cfi_restore 6`. gcc leaves
-  that out at 64 bytes or less; `minimal_drap_2` in `aw-backtrace-test.cc` is
-  that shape.
-* `amd64-drap-regs-test.{c,s}` (`drap_saved_regs`) is the same, with %rbx and
+* `amd64-drap-test.cc` is the DRAP test (§4.3), and also hosts the comparer.
+  Its fixtures are gcc `-mforce-drap` output in `tests/drap/`:
+* `drap/minimal.{c,s}` (`minimal_drap`) realigns to 4096 bytes, so its
+  epilogue has `.cfi_restore 6`. gcc leaves that out at 64 bytes or less;
+  `minimal_drap_2` in `amd64-drap-test.cc` is that shape.
+* `drap/regs.{c,s}` (`drap_saved_regs`) is the same, with %rbx and
   %r12 saved in the DRAP frame: %r10 sits at -16(%rbp) and both registers get
   `DW_CFA_expression` rules.
-* `amd64-drap-variants-test.{c,s}` has more gcc DRAP shapes: all callee-saved
+* `drap/variants.{c,s}` has more gcc DRAP shapes: all callee-saved
   registers saved (`drap_many_regs`, %r10 at -40(%rbp)), and %r13 as the DRAP
   register, from a nested function (`drap_r13_nested`) and from
   `no_caller_saved_registers` (`drap_r13_ncsr`).

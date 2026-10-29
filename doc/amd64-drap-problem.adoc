@@ -8,7 +8,7 @@ arguments on the stack (including structs passed by value), nonlocal
 gotos, `__builtin_setjmp`/`longjmp` and so on. `-mforce-drap` forces
 it. Realignment itself got much more common with x86-64-v3 builds
 (e.g. Ubuntu's amd64v3 variant), where spilling AVX values needs a
-32-byte aligned stack. See amd64-drap-test.c and amd64-drap-test.s.
+32-byte aligned stack. See tests/drap/minimal.c and tests/drap/minimal.s.
 
 A DRAP prologue looks like this:
 
@@ -77,16 +77,16 @@ fp-relative %rbp rule can only be this stale tail.
 
 === Tests
 
-aw-backtrace-test.cc runs all of these through `drap_test_trampoline`
+tests/amd64-drap-test.cc runs all of these through `drap_test_trampoline`
 (an RSP-framed caller, so that getting only RSP wrong is still caught)
 and checks that a backtrace from the callee reaches the trampoline:
 
-* `minimal_drap` (amd64-drap-test.s, realigned to 4096, so with
+* `minimal_drap` (tests/drap/minimal.s, realigned to 4096, so with
   `.cfi_restore 6`) and `minimal_drap_2` (the same without it, as gcc
   emits for 64 bytes or less): the classic shape.
-* `drap_saved_regs` (amd64-drap-regs-test.s): callee-saved registers
+* `drap_saved_regs` (tests/drap/regs.s): callee-saved registers
   around the saved %r10, so the CFA expression is breg6 -16.
-* amd64-drap-variants-test.s: `drap_many_regs` (breg6 -40) and %r13
+* tests/drap/variants.s: `drap_many_regs` (breg6 -40) and %r13
   as the DRAP register in `drap_r13_nested` and `drap_r13_ncsr`.
 
 Under the stepped configuration the comparer also checks every
