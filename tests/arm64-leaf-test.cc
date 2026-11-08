@@ -62,6 +62,7 @@ extern const char plt0_plain_fault_site[];
 extern const char plt0_call_ret_site[];
 extern const char plt0_outer_ret_site[];
 extern char plt0_got[];
+extern char plt0_got_slot[];
 }
 
 // All the fixtures. `udf #0` raises SIGILL and, unlike x86's ud2, is exactly
@@ -260,11 +261,11 @@ null_call_return_site:
 plt0_bti_fixture:
 	bti	c
 	stp	x16, x30, [sp, #-16]!
-	adrp	x16, plt0_got
+	adrp	x16, plt0_got_slot
 	.global plt0_bti_fault_site
 plt0_bti_fault_site:
-	ldr	x17, [x16, #:lo12:plt0_got]
-	add	x16, x16, #:lo12:plt0_got
+	ldr	x17, [x16, #:lo12:plt0_got_slot]
+	add	x16, x16, #:lo12:plt0_got_slot
 	br	x17
 	nop
 	nop
@@ -275,11 +276,11 @@ plt0_bti_fault_site:
 	.balign 16
 plt0_plain_fixture:
 	stp	x16, x30, [sp, #-16]!
-	adrp	x16, plt0_got
+	adrp	x16, plt0_got_slot
 	.global plt0_plain_fault_site
 plt0_plain_fault_site:
-	ldr	x17, [x16, #:lo12:plt0_got]
-	add	x16, x16, #:lo12:plt0_got
+	ldr	x17, [x16, #:lo12:plt0_got_slot]
+	add	x16, x16, #:lo12:plt0_got_slot
 	br	x17
 	nop
 	nop
@@ -337,7 +338,13 @@ plt0_outer_ret_site:
 	.balign 65536
 	.global plt0_got
 plt0_got:
-	.skip 65536
+	.skip 16
+// The slot the fixtures load from. Its lo12 must be nonzero: with lo12 == 0
+// newer GNU ld relaxes `add x16, x16, #0` into a nop, and the fixture no longer
+// has the PLT0 shape DetectPLT0 matches.
+	.global plt0_got_slot
+plt0_got_slot:
+	.skip 65536 - 16
 	.text
 )");
 
@@ -444,7 +451,7 @@ const Plt0Case* current_plt0;
 sigjmp_buf plt0_jmp;
 
 void HandlePlt0Fault(siginfo_t* si, ucontext_t* uc) {
-  CHECK(si->si_addr == plt0_got);
+  CHECK(si->si_addr == plt0_got_slot);
 
   printf("=== %s\n", current_plt0->name);
 
