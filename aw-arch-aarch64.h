@@ -86,19 +86,6 @@ struct Arch {
     return cursor;
   }
 
-  static Cursor InitializeUnwindForCaller(const void* bin_frame_addr) {
-    struct Frame {
-      uintptr_t save_fp;
-      uintptr_t return_addr;
-    };
-    const Frame* f = static_cast<const Frame*>(bin_frame_addr);
-    Cursor ret;
-    ret.pc = CleanReturnAddress(f->return_addr);
-    ret.fp = f->save_fp;
-    ret.sp = ret.fp;
-    return ret;
-  }
-
   static bool IsSignalFrame(uintptr_t pc, uintptr_t sp, std::pair<uintptr_t, uintptr_t> pc_bounds,
                             const ucontext_t** uc_loc) {
     // Two instructions, and every aarch64 instruction is 4-byte
@@ -236,8 +223,7 @@ struct Arch {
   // of any function with a static frame -- which is exactly the case where it
   // also leaves the CFA sp-based. Once sp becomes dynamic gcc switches the CFA
   // to x29-relative and the value we supply goes unused (clang switches
-  // always). So `cfa = *(fp)` is right in both branches, and it is the same
-  // identity InitializeUnwindForCaller already relies on.
+  // always). So `cfa = *(fp)` is right in both branches.
   template <typename AddrChecker>
   static bool GuessFrameRecord(Cursor cursor, AddrChecker* checker, FrameInfo* info) {
     static constexpr uintptr_t kMaxHeuristicsFrameSize = 32 << 10;

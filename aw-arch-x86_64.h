@@ -96,19 +96,6 @@ struct Arch {
     return cursor;
   }
 
-  static Cursor InitializeUnwindForCaller(const void* bin_frame_addr) {
-    struct Frame {
-      uintptr_t save_fp;
-      uintptr_t return_addr;
-    };
-    const Frame* f = static_cast<const Frame*>(bin_frame_addr);
-    Cursor ret;
-    ret.pc = f->return_addr;
-    ret.fp = f->save_fp;
-    ret.sp = reinterpret_cast<uintptr_t>(f + 1);
-    return ret;
-  }
-
   static uintptr_t CleanReturnAddress(uintptr_t addr) {
     return addr;
   }

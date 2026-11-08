@@ -326,6 +326,11 @@ async-signal-safe context are:
 * `aw-arch.h` and `aw-arch-{x86_64,aarch64}.h` --
   architecture-specific parts (arch defaults, plt/signal-frame
   detection, guessing unwind info etc).
+* `aw-asm-{x86_64,aarch64}.S` -- the library's assembly. Currently
+  just the tiny function the entry points use to start a backtrace
+  from their own frame. Both files are meant to be compiled on every
+  architecture; each one is `#if`'ed to its own (and `aw-asm-notes.h`
+  holds the ELF notes they need).
 * `aw-structs.h` and `dwarf-constants.h` -- basic arch-neutral
   definitions
 * `eh-frame-reader.h` -- general code for reading `.eh_frame{,_hdr}`

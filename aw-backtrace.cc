@@ -38,9 +38,9 @@
 #include "unwind-info-cache.h"
 #include "utils.h"
 
+using aw_backtrace_internal::Arch;
 using aw_backtrace_internal::Cursor;
 using aw_backtrace_internal::FrameInfo;
-using aw_backtrace_internal::PrepareCursor;
 
 using aw_backtrace_ext::DebugExtensionV0;
 
@@ -736,11 +736,13 @@ static inline void BumpFastPathStat(SimpleCounter& counter) {
   }
 }
 
+// skip_first_callback: the first frame is one the caller has already dealt
+// with -- as for UnwindLoop -- so step out of it without reporting it.
 template <typename Diag>
-void UnwindLoopFastPath(Cursor cursor, const ucontext_t* uc, aw_backtrace_callback callback, void* user_data,
-                        Diag diag) {
+void UnwindLoopFastPath(Cursor cursor, const ucontext_t* uc, aw_backtrace_callback callback, void* user_data, Diag diag,
+                        bool skip_first_callback) {
   if (!diag.use_fastpath()) {
-    return UnwindLoop<Diag>(cursor, uc, callback, user_data, diag, /*skip_first_callback=*/false);
+    return UnwindLoop<Diag>(cursor, uc, callback, user_data, diag, skip_first_callback);
   }
 
   LazyAddrChecker checker;
@@ -752,6 +754,14 @@ void UnwindLoopFastPath(Cursor cursor, const ucontext_t* uc, aw_backtrace_callba
   EHReaderInputs eh_frame_storage;
   EHReaderInputs* eh_frame = nullptr;
   FrameInfo info;
+
+  // Enter the loop past the callback rather than testing a flag on every
+  // frame. This also skips the zero-pc check, which is fine: the skipped frame
+  // is the entry point's own, captured by aw_capture_caller_cursor, so its pc
+  // is a real return address.
+  if (skip_first_callback) {
+    goto skip_callback;
+  }
 
   while (true) {
     // Same policy as UnwindLoop: a zero pc ends the walk only when it came from
@@ -766,6 +776,7 @@ void UnwindLoopFastPath(Cursor cursor, const ucontext_t* uc, aw_backtrace_callba
       return;
     }
 
+  skip_callback:
     const uintptr_t lookup_pc = PREDICT_TRUE(uc == nullptr) ? cursor.pc - 1 : cursor.pc;
 
     // Same policy as UnwindLoop: cache non-leaf frames only (uc == nullptr
@@ -861,26 +872,40 @@ fallback:
 
 NEVER_INLINE
 void DiagUnwindLoop(Cursor cursor, const ucontext_t* uc, aw_backtrace_callback callback, void* user_data,
-                    const DebugExtensionV0::DiagOptions& options) {
+                    const DebugExtensionV0::DiagOptions& options, bool skip_first_callback) {
   RuntimeDiag diag{&options};
-  return UnwindLoopFastPath<RuntimeDiag>(cursor, uc, callback, user_data, diag);
+  return UnwindLoopFastPath<RuntimeDiag>(cursor, uc, callback, user_data, diag, skip_first_callback);
 }
 
 }  // namespace aw_backtrace_internal
 
 using aw_backtrace_internal::global_options_override;
 
+// How the entry points start a walk. With a ucontext: the interrupted frame,
+// reported as frame 0. Without one: the entry point's own frame, captured by
+// aw_capture_caller_cursor, which the loop steps out of without reporting
+// (skip_first). That call has to be made by the entry point itself -- from a
+// helper it would capture the helper's frame -- and the entry points are
+// NEVER_INLINE so that "the entry point's own frame" exists: inlined, the
+// skipped frame would be its caller's.
 NEVER_INLINE
 void aw_backtrace_full(const void* _uc, aw_backtrace_callback callback, void* user_data) {
   const ucontext_t* uc = static_cast<const ucontext_t*>(_uc);
-  Cursor cursor = PrepareCursor(uc, __builtin_frame_address(0));
+  Cursor cursor;
+  const bool skip_first = (uc == nullptr);
+  if (skip_first) {
+    aw_capture_caller_cursor(&cursor);
+  } else {
+    cursor = Arch::CursorFromContext(uc);
+  }
 
   if (PREDICT_FALSE(global_options_override != nullptr)) {
-    DiagUnwindLoop(cursor, uc, callback, user_data, *global_options_override);
+    DiagUnwindLoop(cursor, uc, callback, user_data, *global_options_override, skip_first);
     return;
   }
 
-  aw_backtrace_internal::UnwindLoopFastPath(cursor, uc, callback, user_data, aw_backtrace_internal::NoDiag{});
+  aw_backtrace_internal::UnwindLoopFastPath(cursor, uc, callback, user_data, aw_backtrace_internal::NoDiag{},
+                                            skip_first);
 }
 
 NEVER_INLINE
@@ -911,14 +936,21 @@ int aw_backtrace(const void* _uc, void** result, int max_frames, int skip) {
 
   struct State state = {result, max_frames, skip > 0 ? skip : 0, 0};
   const ucontext_t* uc = static_cast<const ucontext_t*>(_uc);
-  Cursor cursor = PrepareCursor(uc, __builtin_frame_address(0));
+  Cursor cursor;
+  const bool skip_first = (uc == nullptr);
+  if (skip_first) {
+    aw_capture_caller_cursor(&cursor);
+  } else {
+    cursor = Arch::CursorFromContext(uc);
+  }
 
   if (PREDICT_FALSE(global_options_override != nullptr)) {
-    DiagUnwindLoop(cursor, uc, State::callback, &state, *global_options_override);
+    DiagUnwindLoop(cursor, uc, State::callback, &state, *global_options_override, skip_first);
     return state.count;
   }
 
-  aw_backtrace_internal::UnwindLoopFastPath(cursor, uc, State::callback, &state, aw_backtrace_internal::NoDiag{});
+  aw_backtrace_internal::UnwindLoopFastPath(cursor, uc, State::callback, &state, aw_backtrace_internal::NoDiag{},
+                                            skip_first);
   return state.count;
 }
 
@@ -936,14 +968,20 @@ class DebugExtensionImpl final : public DebugExtensionV0 {
  public:
   constexpr DebugExtensionImpl() = default;
 
-  // noinline for the same reason aw_backtrace() is: __builtin_frame_address(0)
-  // has to name this frame, and within this TU the call is devirtualizable.
+  // noinline for the same reason aw_backtrace_full() is, and within this TU
+  // the call is devirtualizable.
   NEVER_INLINE
   void BacktraceExt(const void* _uc, aw_backtrace_callback callback, void* user_data,
                     const DiagOptions& options) override {
     const ucontext_t* uc = static_cast<const ucontext_t*>(_uc);
-    Cursor cursor = PrepareCursor(uc, __builtin_frame_address(0));
-    DiagUnwindLoop(cursor, uc, callback, user_data, options);
+    Cursor cursor;
+    const bool skip_first = (uc == nullptr);
+    if (skip_first) {
+      aw_capture_caller_cursor(&cursor);
+    } else {
+      cursor = Arch::CursorFromContext(uc);
+    }
+    DiagUnwindLoop(cursor, uc, callback, user_data, options, skip_first);
   }
 
   bool LookupFrameInfo(uintptr_t lookup_ip,

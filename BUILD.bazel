@@ -39,6 +39,9 @@ cc_library(
 cc_library(
     name = "aw-backtrace",
     srcs = [
+        # Both, on every arch: each is #if'ed to its own (see aw-asm-notes.h).
+        "aw-asm-aarch64.S",
+        "aw-asm-x86_64.S",
         "aw-backtrace.cc",
         "backtrace-core.cc",
     ],
@@ -389,6 +392,9 @@ cc_library(
     name = "aw-backtrace-prefixed",
     testonly = True,
     srcs = [
+        # Both, on every arch: each is #if'ed to its own (see aw-asm-notes.h).
+        "aw-asm-aarch64.S",
+        "aw-asm-x86_64.S",
         "aw-backtrace.cc",
         "backtrace-core.cc",
     ],

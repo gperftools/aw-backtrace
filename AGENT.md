@@ -145,6 +145,7 @@ defines it; Bazel does not. The `RuntimeDiag` path always bumps them, so
 | `eh-frame-reader.h` | the *decoder* half: `.eh_frame_hdr` search, CIE/FDE parsing and the CFI opcode loop. It is visitor-templated |
 | `aw-structs.h` | the unwind model: `CfaRule`, `RegisterRule`, `FrameInfo`, `Cursor`, `CompressedFrameInfo` |
 | `aw-arch.h`, `aw-arch-{x86_64,aarch64}.h` | per-arch `struct Arch` with a fixed static interface: register numbers, PLT and signal-frame byte matching, `GuessUnwindInfo` |
+| `aw-asm-{x86_64,aarch64}.S`, `aw-asm-notes.h` | the library's assembly, currently just `aw_capture_caller_cursor`, which gives the entry points their starting `Cursor` (§4.1); the ELF notes every `.S` must carry |
 | `unwind-info-cache.h` | `UnwindInfoCache` (§4.4) |
 | `aw-addrcheck.{h,c}` | async-signal-safe `/proc/self/maps` queries, using `PROCMAP_QUERY` or a snapshot plus bsearch |
 | `with-exit.h` | `WithExit::Run`/`Exit`, a `_setjmp`/`_longjmp` wrapper. **Nothing runs on the way out, not even destructors** |
@@ -250,13 +251,41 @@ process image (§4.5).
 
 ### 4.1 The main loop
 
-`aw_backtrace_full` (callback) and `aw_backtrace` (array) build a `Cursor`
-with `PrepareCursor()`, starting from the `ucontext` or from their own
-`__builtin_frame_address(0)`. They, and `DebugExtensionV0::BacktraceExt`, are
-`NEVER_INLINE` because that frame address must name their own frame. They then
-call `UnwindLoopFastPath()`, which falls through to `UnwindLoop()`. When
-`OverrideGlobalBacktracer` is set, they go through `DiagUnwindLoop`
+`aw_backtrace_full` (callback), `aw_backtrace` (array) and
+`DebugExtensionV0::BacktraceExt` start from the `ucontext` when given one.
+Without one they call `aw_capture_caller_cursor` (`aw-asm-*.S`), which
+returns their *own* frame as an ordinary non-leaf `Cursor`. The loop steps out
+of that frame by its CFI without reporting it (`skip_first_callback`).
+They then call `UnwindLoopFastPath()`, which falls through to `UnwindLoop()`.
+When `OverrideGlobalBacktracer` is set, they go through `DiagUnwindLoop`
 (`RuntimeDiag`) instead.
+
+**The caller's sp cannot be derived from the frame record on aarch64.**
+AAPCS64 doesn't fix where in the frame the `{x29, x30}` record goes. gcc moves
+it to the top of the frame whenever the function gets a stack canary
+(`-fstack-protector-strong`), and it then still describes the CFA from sp. That
+is why the walk unwinds through the entry point's own frame instead of
+guessing from `__builtin_frame_address(0)`. `__builtin_dwarf_cfa()` is no
+replacement: clang returns plain x29 for it on aarch64. Only
+`simple-fp-backtrace.cc` still starts from its own frame record, and it
+never uses sp.
+
+Traps:
+
+* `aw_capture_caller_cursor` must be called *by the entry point itself*.
+  Called from a helper, it captures the helper's frame. The entry points stay
+  `NEVER_INLINE`, because inlined into a caller the skipped frame would be the
+  caller's.
+* Both `aw-asm-*.S` are compiled on every arch, and each is `#if`'ed to
+  its own. So an embedder can add both files unconditionally. Each ends by
+  `#include`-ing `aw-asm-notes.h`, so that the wrong-arch, empty object also
+  carries `.note.GNU-stack` and the `.note.gnu.property` BTI/PAC/GCS or
+  IBT/SHSTK bits. The linker ANDs those bits over all inputs, empty ones
+  included, so one unmarked object drops them for the whole output. The bits
+  and the `bti c`/`endbr64` landing pads are unconditional, whatever the build
+  flags: they are NOPs where unused, and the AND means they can never mark an
+  output the rest of the build doesn't.
+* The asm hardcodes `Cursor`'s layout; `aw-arch.h` `static_assert`s it.
 
 **`is_leaf` means "the pc came from a register file, not from an unwind
 step"**; that is why the public parameter is named `pc_before_insn`. It is
