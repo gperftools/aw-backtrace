@@ -354,6 +354,10 @@ cc_test(
 cc_test(
     name = "sve-test",
     srcs = ["tests/sve-test.cc"],
+    # The SVE frame is guessed through its frame record (we don't evaluate
+    # its CFA expression), which needs one. Per-target copts come after
+    # --copt, so this holds in test-all-cfg.rb's -fomit-frame-pointer sets.
+    copts = ["-fno-omit-frame-pointer"],
     cxxopts = CXXOPTS,
     target_compatible_with = [
         "@platforms//os:linux",
