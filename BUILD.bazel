@@ -349,6 +349,22 @@ cc_test(
     ],
 )
 
+# Unwinding through a function with an SVE local. Skips itself on CPUs
+# without SVE and on compilers too old for its target attribute.
+cc_test(
+    name = "sve-test",
+    srcs = ["tests/sve-test.cc"],
+    cxxopts = CXXOPTS,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+    deps = [
+        ":aw-backtrace",
+        ":headers",
+    ],
+)
+
 cc_binary(
     name = "recursion-test",
     srcs = ["tests/recursion-test.cc"],
