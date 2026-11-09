@@ -21,6 +21,9 @@ struct CfaRule {
     FpRel,
     RegRel,
     DerefFpRel,
+    // The CFA, and so the caller's sp, is not known. Only guesses produce
+    // it (aarch64's GuessFrameRecord); the step sets sp to kUnknownReg.
+    Unknown,
   };
 
   Kind kind{Kind::Unsupported};
@@ -43,6 +46,9 @@ struct CfaRule {
   }
   static constexpr CfaRule DerefFpRel(int32_t off) {
     return {Kind::DerefFpRel, -1, off};
+  }
+  static constexpr CfaRule Unknown() {
+    return {Kind::Unknown};
   }
 };
 
@@ -125,6 +131,9 @@ inline std::string DescribeFrameInfo(const FrameInfo& f) {
       break;
     case CfaRule::Kind::DerefFpRel:
       cfa = "*(fp+" + std::to_string(f.cfa.offset) + ")";
+      break;
+    case CfaRule::Kind::Unknown:
+      cfa = "unknown";
       break;
     case CfaRule::Kind::Unsupported:
       cfa = "unsupported";
@@ -228,6 +237,12 @@ struct Cursor {
   uintptr_t sp;
   uintptr_t fp;
 };
+
+// Cursor::sp after a guess that could not tell it (CfaRule::Unknown). Never a
+// real sp: it is unaligned, and any offset from it wraps to an address no
+// stack read accepts. 0 would not do for fp, where it marks the end of the
+// frame chain, so this one value is kept for both.
+inline constexpr uintptr_t kUnknownReg = ~uintptr_t{0};
 
 }  // namespace aw_backtrace_internal
 

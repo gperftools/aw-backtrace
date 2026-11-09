@@ -403,6 +403,8 @@ struct Arch {
   }
 
  public:
+  // Every guess here gives an exact CFA, so sp never becomes kUnknownReg on
+  // x86-64. (If it ever did, the VMA lookup below would reject it.)
   template <typename AddrChecker>
   static bool GuessUnwindInfo(Cursor cursor, const ucontext_t*, AddrChecker* checker, FrameInfo* info) {
     auto stack_vma = checker->Lookup(cursor.sp);

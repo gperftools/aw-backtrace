@@ -594,12 +594,38 @@ spurious frame, because the next step is non-leaf and reaches the real caller
 through fp. Preferring the record wrongly deletes a caller.
 `arm64-leaf-test.cc` covers both cases.
 
-**The frame-record walk takes the CFA from `*(fp)`**, the caller's x29, because
-`fp + 16` is only a lower bound. gcc keeps `x29 == sp` through the body
-whenever the CFA is sp-based. The rule is `cfa = DerefFpRel(0)`,
-`fp = MemFpRel(0)`, `ra = MemFpRel(8)`. `RegisterRule::MemFpRel` for RA exists
-only for this rule, and `CompressedFrameInfo` cannot represent it, which is
-fine because guesses are never cached.
+**The frame record gives the caller's pc and x29 exactly, but not its sp**
+(the CFA). AAPCS64 doesn't fix where in the frame the record goes. gcc puts it
+at the bottom, but above outgoing stack arguments, and at the top for any
+function with a stack canary; clang puts it near the top. So the guess's CFA
+is `CfaRule::Unknown`, and the step sets the caller's sp to **`kUnknownReg`**
+(`~0`: unaligned, and any offset from it wraps to an address no stack read
+accepts). The callback gets 0 for it, as `aw-backtrace.h` promises.
+
+**The caller's own CFI then decides**, in `UnwindLoop`:
+
+* an x29-based CFA (clang's frame-pointer frames, gcc's alloca frames) makes
+  sp exact again;
+* an sp-based CFA can't be used, so the frame is guessed too, through its own
+  frame record;
+* with sp unknown, signal frames can't be found (the sigframe is located from
+  sp), so a walk that reaches one goes to the guess instead.
+
+gcc's frame-pointer frames use an sp-based CFA, so on gcc code the rest of the
+walk after a guess is usually a frame-record walk. Frame records are near
+universal in aarch64 code, so that loses little: a function without one (an
+explicit `-fomit-frame-pointer` build, some asm) drops its caller from the
+trace. `arm64-leaf-test.cc` case 7 covers the guess-again path and case 8 the
+way back to a known sp.
+
+There used to be a derivation of the caller's sp from its x29 and its own CFI
+(valid when the CFI saves x29 and x30 as a pair). It was dropped for this,
+since frame records make the end result almost always the same.
+
+The other two rules are `fp = MemFpRel(0)` and `ra = MemFpRel(8)`.
+`RegisterRule::MemFpRel` for RA exists only for this guess, and
+`CompressedFrameInfo` cannot represent it, nor `CfaRule::Unknown`. **Guesses
+are never cached**: they depend on the cursor, not just the pc.
 
 **The guess never reads code**, so it cannot fault on execute-only text. A
 candidate pc must be nonzero, 4-aligned and in an executable VMA. There is one

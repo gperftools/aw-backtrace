@@ -548,7 +548,9 @@ void UnwindLoop(Cursor cursor, const ucontext_t* in_uc, aw_backtrace_callback ca
     if (PREDICT_FALSE(skip_first_callback)) {
       skip_first_callback = false;
     } else {
-      if (!callback(reinterpret_cast<void*>(cursor.pc), reinterpret_cast<void*>(cursor.sp), is_leaf, user_data)) {
+      // An unknown sp is reported as 0, as aw-backtrace.h promises.
+      const uintptr_t report_sp = (cursor.sp == kUnknownReg) ? 0 : cursor.sp;
+      if (!callback(reinterpret_cast<void*>(cursor.pc), reinterpret_cast<void*>(report_sp), is_leaf, user_data)) {
         break;
       }
     }
@@ -579,15 +581,19 @@ void UnwindLoop(Cursor cursor, const ucontext_t* in_uc, aw_backtrace_callback ca
     } else {  // !is_leaf
       const bool use_cache = diag.use_cache();
       if (use_cache && g_frame_info_cache.Lookup<Diag::kUseCacheStats>(lookup_pc, &info)) {
-        goto have_info;
-      }
-
-      outcome = DoUnwindLookup(lookup_pc, &info, diag.flags());
-
-      if (outcome == LookupOutcome::kOk) {
-        if (use_cache) {
+        outcome = LookupOutcome::kOk;
+      } else {
+        outcome = DoUnwindLookup(lookup_pc, &info, diag.flags());
+        if (outcome == LookupOutcome::kOk && use_cache) {
           g_frame_info_cache.Put<Diag::kUseCacheStats>(lookup_pc, &info);
         }
+      }
+
+      // After a guess that could not tell the caller's sp (aarch64's
+      // GuessFrameRecord), an sp-based CFA has nothing to start from, so this
+      // frame is guessed too. Any other CFA rule makes sp known again. (Leaf
+      // frames come from a register file, so their sp is always known.)
+      if (outcome == LookupOutcome::kOk && !(cursor.sp == kUnknownReg && info.cfa.kind == CfaRule::Kind::SpRel)) {
         goto have_info;
       }
     }
@@ -609,7 +615,9 @@ void UnwindLoop(Cursor cursor, const ucontext_t* in_uc, aw_backtrace_callback ca
         goto have_info;
       }
 
-      if (Arch::IsSignalFrame(cursor.pc, cursor.sp, pc_bounds, &next_uc)) {
+      // The sigframe is found from sp, so with sp unknown a signal frame can't
+      // be stepped through, and the guess below decides.
+      if (cursor.sp != kUnknownReg && Arch::IsSignalFrame(cursor.pc, cursor.sp, pc_bounds, &next_uc)) {
         // Step through signal frame
         cursor = Arch::CursorFromContext(next_uc);
         continue;
@@ -626,6 +634,7 @@ void UnwindLoop(Cursor cursor, const ucontext_t* in_uc, aw_backtrace_callback ca
         }
       }
 
+      // Guesses are never cached: they depend on the cursor, not just the pc.
       if (Arch::GuessUnwindInfo(cursor, this_frame_uc, &checker, &info)) {
         // info is good already
         goto have_info;
@@ -657,6 +666,11 @@ void UnwindLoop(Cursor cursor, const ucontext_t* in_uc, aw_backtrace_callback ca
         }
         break;
       }
+      case CfaRule::Kind::Unknown:
+        // Only the guess's fp-relative rules below may be used with it; a
+        // CFA-relative read from kUnknownReg wraps and fails the stack check.
+        cfa = kUnknownReg;
+        break;
       case CfaRule::Kind::Unsupported:
         return;
     }
