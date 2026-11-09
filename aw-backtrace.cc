@@ -619,11 +619,11 @@ void UnwindLoop(Cursor cursor, const ucontext_t* in_uc, aw_backtrace_callback ca
         // An expression we don't interpret, and nothing above recognized
         // the frame. Redo the lookup, this time letting the expression
         // diagnostic actually fire -- a second full decode, but this is
-        // already the exceptional, off-the-fast-path case.
+        // already the exceptional, off-the-fast-path case. Then guess, as
+        // for any other CFI we can't use.
         if constexpr (!Diag::kNoDiag) {
           DoUnwindLookup(lookup_pc, &info, diag.flags_with_expression_diag());
         }
-        break;
       }
 
       if (Arch::GuessUnwindInfo(cursor, this_frame_uc, &checker, &info)) {

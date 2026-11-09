@@ -16,11 +16,10 @@ The contract:
   occasional *wrong* backtrace is acceptable; crashing is not.
 * Only PC, SP and FP are unwound. There is no full DWARF register-state
   unwinding, on the bet that real frames are SP-offset or FP-framed.
-* CFI outside that model fails the frame (reported when diagnostics are
-  enabled; otherwise the backtrace is silently truncated). It is never
-  reinterpreted. Heuristics (PLT and trampoline byte matching,
-  `GuessUnwindInfo`) run only when CFI is missing or is an expression
-  (§4.1), and they run silently.
+* CFI outside that model fails the lookup (reported when diagnostics are
+  enabled). It is never reinterpreted. Heuristics (PLT and trampoline byte
+  matching, then `GuessUnwindInfo`) run only when the lookup fails, whether
+  CFI is missing or unusable (§4.1), and they run silently.
 * Targets modern Linux with glibc 2.35+ (`_dl_find_object`). x86-64
   and aarch64 are supported; x86-64 has much more test coverage. riscv
   and 32-bit may come later.
@@ -318,9 +317,11 @@ When a lookup produces nothing, the **fallback chain** runs in this order:
    aarch64 matches ordinary 16-byte entries and PLT0 (optionally `bti c`),
    which moves sp by 16.
 2. Signal-trampoline byte match, at any instruction of the trampoline.
-3. DRAP: x86-64 only, and only if the failure was a CFI expression.
-4. Refusal, if the failure was a CFI expression.
-5. `Arch::GuessUnwindInfo`.
+3. If the failure was a CFI expression, its diagnostic, which needs the
+   second decode. It is reported only here so that steps 1 and 2 can claim
+   the frame first (glibc's `__restore_rt` and the lazy PLT carry
+   expressions).
+4. `Arch::GuessUnwindInfo`, as for any other CFI we can't use.
 
 Everything in the chain that reads code is bounds-checked against
 `LazyAddrChecker::ExecutableBoundsFor()`. Byte matching of this kind breaks
