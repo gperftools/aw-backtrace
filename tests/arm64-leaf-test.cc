@@ -239,8 +239,8 @@ cfiless_subsp_ret_site:
 	.size call_cfiless_subsp, .-call_cfiless_subsp
 
 // ---- case 7: CFI-less function with a frame record, called from a caller
-// whose CFA is sp-based but whose frame record sits at the *top* of its frame,
-// x29 well above sp. That is gcc's layout for any function with a stack
+// whose CFA is sp-based but whose frame record is at the frame's highest
+// addresses, x29 = sp + 80. That is gcc's layout for any function with a stack
 // canary. x30 is clobbered, as if used as scratch, so the leaf guess rejects
 // it and the frame-record walk runs directly. The walk gets the caller's pc
 // and x29 exactly, but not its sp: assuming sp == x29 would put the caller's
@@ -306,8 +306,8 @@ cfiless_toprec_outer_ret_site:
 
 // ---- case 8: sp becomes known again. The CFI-less callee is guessed as in
 // case 7, which leaves the caller's sp unknown. Its caller, call_cfiless_resync,
-// has an x29-based CFA, which makes sp exact again. Above that,
-// call_cfiless_resync_nofp keeps no frame record (x29 still points at
+// has an x29-based CFA, which makes sp exact again. Its own caller,
+// call_cfiless_resync_nofp, keeps no frame record (x29 still points at
 // call_cfiless_resync_outer's) and has an sp-based CFA: only an exact sp finds
 // its return address. With sp still unknown it would be guessed through
 // x29, and call_cfiless_resync_outer's frame would go missing. ----
@@ -448,7 +448,7 @@ plt0_plain_fault_site:
 	nop
 	.size plt0_plain_fixture, .-plt0_plain_fixture
 
-// x0 = the fixture. Two CFI'd frames above it, so that the frame *after* the
+// x0 = the fixture. Two CFI'd frames call it, so that the frame *after* the
 // one x30 recovers is checkable too: that is where a wrong CFA shows, as
 // call_plt0 repeated.
 	.global call_plt0
@@ -522,8 +522,8 @@ struct Fixture {
   // Non-null for case 2 only: the spurious frame a stale x30 produces before
   // the walk self-corrects.
   const char* stale_site;
-  // False for the fixture whose CFA we knowingly get wrong, where everything
-  // below the recovered frame is garbage by construction.
+  // False for the fixture whose CFA we knowingly get wrong, where every frame
+  // after the recovered one is garbage by construction.
   bool walk_continues;
   // The frames right after ret_site, where set: the check that the CFA (or
   // its absence) recovered along with ret_site is handled right.
@@ -737,7 +737,7 @@ int main() {
       // The frame record leaves the caller's sp unknown, and the caller's
       // sp-based CFA can't use it, so the caller is guessed through its own
       // record too (see Arch::GuessFrameRecord and UnwindLoop).
-      {"cfi-less framed, caller with record at top (gcc canary layout)",
+      {"cfi-less framed, caller with record right before its CFA (gcc canary layout)",
        call_cfiless_toprec_outer,
        7,
        cfiless_toprec_ret_site,

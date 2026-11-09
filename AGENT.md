@@ -261,8 +261,9 @@ When `OverrideGlobalBacktracer` is set, they go through `DiagUnwindLoop`
 
 **The caller's sp cannot be derived from the frame record on aarch64.**
 AAPCS64 doesn't fix where in the frame the `{x29, x30}` record goes. gcc moves
-it to the top of the frame whenever the function gets a stack canary
-(`-fstack-protector-strong`), and it then still describes the CFA from sp. That
+it right before the CFA (the frame's highest addresses) whenever the function
+gets a stack canary (`-fstack-protector-strong`), and it then still describes
+the CFA from sp. That
 is why the walk unwinds through the entry point's own frame instead of
 guessing from `__builtin_frame_address(0)`. `__builtin_dwarf_cfa()` is no
 replacement: clang returns plain x29 for it on aarch64. Only
@@ -596,8 +597,9 @@ through fp. Preferring the record wrongly deletes a caller.
 
 **The frame record gives the caller's pc and x29 exactly, but not its sp**
 (the CFA). AAPCS64 doesn't fix where in the frame the record goes. gcc puts it
-at the bottom, but above outgoing stack arguments, and at the top for any
-function with a stack canary; clang puts it near the top. So the guess's CFA
+at the frame's lowest address, but after any outgoing stack arguments, and
+right before the CFA for any function with a stack canary; clang puts it near
+the CFA. So the guess's CFA
 is `CfaRule::Unknown`, and the step sets the caller's sp to **`kUnknownReg`**
 (`~0`: unaligned, and any offset from it wraps to an address no stack read
 accepts). The callback gets 0 for it, as `aw-backtrace.h` promises.
@@ -617,10 +619,6 @@ universal in aarch64 code, so that loses little: a function without one (an
 explicit `-fomit-frame-pointer` build, some asm) drops its caller from the
 trace. `arm64-leaf-test.cc` case 7 covers the guess-again path and case 8 the
 way back to a known sp.
-
-There used to be a derivation of the caller's sp from its x29 and its own CFI
-(valid when the CFI saves x29 and x30 as a pair). It was dropped for this,
-since frame records make the end result almost always the same.
 
 The other two rules are `fp = MemFpRel(0)` and `ra = MemFpRel(8)`.
 `RegisterRule::MemFpRel` for RA exists only for this guess, and

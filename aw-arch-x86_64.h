@@ -436,8 +436,8 @@ struct Arch {
     }
 
     // A number of simpler asm codes which often lack unwind info
-    // simply don't use stack. So we check if top of the stack
-    // contains probable return address.
+    // simply don't use stack. So we check if the word at sp is a
+    // probable return address.
     if (CheckPossiblePC(checker, top_stack_value)) {
       // printf("at 0x%zx guessed cfa: (sp + 8) = 0x%zx, fp same = 0x%zx, and pc = *(cfa - 8) = %zx\n",
       //        cursor.pc, cursor.sp + 8, cursor.fp,

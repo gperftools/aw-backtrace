@@ -217,10 +217,10 @@ struct Arch {
   //
   // That gives the caller's pc and x29 exactly. What it does not give is the
   // CFA -- the caller's sp. AAPCS64 does not say where in the frame the record
-  // goes (gcc puts it at the bottom, except at the top for functions with a
-  // stack canary or outgoing stack arguments below it; clang puts it near the
-  // top), so only the frame size, which we cannot know without unwind info,
-  // separates fp from the CFA.
+  // goes (gcc puts it at the frame's lowest address, but after any outgoing
+  // stack arguments, and right before the CFA for functions with a stack
+  // canary; clang puts it near the CFA), so only the frame size, which we
+  // cannot know without unwind info, separates fp from the CFA.
   //
   // So the CFA is CfaRule::Unknown, and the caller's sp becomes kUnknownReg.
   // The caller's own CFI then decides: an x29-based CFA makes sp known again,
@@ -258,8 +258,8 @@ struct Arch {
       return false;
     }
     // Either the chain terminator libc plants in the outermost frame, or a
-    // record strictly further up the stack. The +16 is the far end of the
-    // bracket the CFA lives in: a caller's x29 below fp + 16 cannot be real.
+    // record at a strictly higher address. The +16 is the lowest address the
+    // CFA can have: a caller's x29 lower than fp + 16 cannot be real.
     if (saved_fp != 0 && (saved_fp < fp + 16 || (saved_fp & 15) != 0)) {
       return false;
     }
