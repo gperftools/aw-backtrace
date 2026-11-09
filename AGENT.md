@@ -557,8 +557,9 @@ Per-arch details:
 * **aarch64 clang emits `code_align 1 / data_align -4`**, so clang-built objects
   miss the fast path and take the slow one. The trade-off is accepted on
   purpose; do not add a second alignment pair to the hot loop.
-* `DW_CFA_AARCH64_negate_ra_state` is a no-op here, as in the reader. gcc emits
-  it in nearly every FDE under `-mbranch-protection`.
+* `DW_CFA_AARCH64_negate_ra_state` (and its `_with_pc` variant, from clang's
+  `-mbranch-protection=pac-ret+pc`) is a no-op here, as in the reader. gcc
+  emits the former in nearly every FDE under `-mbranch-protection`.
 * **The leaf frame must support RA-in-register**, read from the `ucontext`.
   Without that, the fast path would bail on frame 0 of every signal capture.
   The recovered pc goes through `Arch::CleanReturnAddress`, which strips PAC on
