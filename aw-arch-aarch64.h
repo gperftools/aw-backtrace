@@ -222,13 +222,12 @@ struct Arch {
   // canary; clang puts it near the CFA), so only the frame size, which we
   // cannot know without unwind info, separates fp from the CFA.
   //
-  // So the CFA is CfaRule::Unknown, and the caller's sp becomes kUnknownReg.
-  // The caller's own CFI then decides: an x29-based CFA makes sp known again,
-  // and an sp-based one sends the caller here too (see UnwindLoop). Frame
-  // records are near universal in aarch64 code, so walking them until then
-  // loses little.
+  // So the caller's sp is kUnknownReg. The caller's own CFI then decides: an
+  // x29-based CFA makes sp known again, and an sp-based one sends the caller
+  // here too (see UnwindLoop). Frame records are near universal in aarch64
+  // code, so walking them until then loses little.
   template <typename AddrChecker>
-  static bool GuessFrameRecord(Cursor cursor, AddrChecker* checker, FrameInfo* info) {
+  static bool GuessFrameRecord(Cursor cursor, AddrChecker* checker, Cursor* caller) {
     static constexpr uintptr_t kMaxHeuristicsFrameSize = 32 << 10;
 
     uintptr_t fp = cursor.fp;
@@ -264,9 +263,7 @@ struct Arch {
       return false;
     }
 
-    info->cfa = CfaRule::Unknown();        // caller's sp: unknown
-    info->fp = RegisterRule::MemFpRel(0);  // caller's x29 == *(fp)
-    info->ra = RegisterRule::MemFpRel(8);  // caller's pc  == *(fp + 8)
+    *caller = Cursor{.pc = saved_lr, .sp = kUnknownReg, .fp = saved_fp};
     return true;
   }
 
@@ -297,7 +294,7 @@ struct Arch {
   // with an exact CFA; and a non-leaf pc, being a return address, can never
   // land inside a prologue.
   template <typename AddrChecker>
-  static bool GuessUnwindInfo(Cursor cursor, const ucontext_t* uc_if_leaf, AddrChecker* checker, FrameInfo* info) {
+  static bool GuessCaller(Cursor cursor, const ucontext_t* uc_if_leaf, AddrChecker* checker, Cursor* caller) {
     if (uc_if_leaf != nullptr) {
       // CleanReturnAddress first: with FEAT_PAuth the register holds a signed
       // pointer, which would fail the checks below on its tag bits alone.
@@ -305,12 +302,12 @@ struct Arch {
       if (CheckPossiblePC(checker, lr)) {
         // Exactly the architectural default: CFA = sp, RA in x30, fp
         // unchanged.
-        ResetFrameInfo(info);
+        *caller = Cursor{.pc = lr, .sp = cursor.sp, .fp = cursor.fp};
         return true;
       }
     }
 
-    return GuessFrameRecord(cursor, checker, info);
+    return GuessFrameRecord(cursor, checker, caller);
   }
 
   static void ResetFrameInfo(FrameInfo* info) {

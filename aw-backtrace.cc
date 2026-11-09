@@ -537,7 +537,7 @@ void UnwindLoop(Cursor cursor, const ucontext_t* in_uc, aw_backtrace_callback ca
     // a live jump through a null function pointer. There the pc is genuinely 0
     // and worth reporting, and the stack is intact: `call *%rax` pushed the
     // return address before faulting on the fetch at 0, so sp points right at
-    // it and Arch::GuessUnwindInfo below recovers the caller. Bailing out here
+    // it and Arch::GuessCaller below recovers the caller. Bailing out here
     // would throw away the whole backtrace in the case that needs it most.
     //
     // This is also what keeps lookup_pc's `- 1` below from underflowing.
@@ -634,10 +634,12 @@ void UnwindLoop(Cursor cursor, const ucontext_t* in_uc, aw_backtrace_callback ca
         }
       }
 
-      // Guesses are never cached: they depend on the cursor, not just the pc.
-      if (Arch::GuessUnwindInfo(cursor, this_frame_uc, &checker, &info)) {
-        // info is good already
-        goto have_info;
+      // A guess gives the caller's cursor directly, from values it has
+      // already read and checked.
+      Cursor caller;
+      if (Arch::GuessCaller(cursor, this_frame_uc, &checker, &caller)) {
+        cursor = caller;
+        continue;
       }
 
       break;  // no way to step from current cursor
@@ -666,11 +668,6 @@ void UnwindLoop(Cursor cursor, const ucontext_t* in_uc, aw_backtrace_callback ca
         }
         break;
       }
-      case CfaRule::Kind::Unknown:
-        // Only the guess's fp-relative rules below may be used with it; a
-        // CFA-relative read from kUnknownReg wraps and fails the stack check.
-        cfa = kUnknownReg;
-        break;
       case CfaRule::Kind::Unsupported:
         return;
     }
@@ -687,15 +684,6 @@ void UnwindLoop(Cursor cursor, const ucontext_t* in_uc, aw_backtrace_callback ca
         break;
       case RegisterRule::Kind::MemCfaRel:
         if (!acc.TryReadPtr(AddOffset(cfa, info.ra.offset), &new_ip)) {
-          new_ip = 0;
-        }
-        break;
-      // Only guesses produce this: an fp-relative RA lets a frame-record walk
-      // read the return address without first committing to a CFA it cannot
-      // know (see aarch64's GuessFrameRecord). Failure is handled the same way
-      // as above -- a zero pc stops the walk at the top of the next iteration.
-      case RegisterRule::Kind::MemFpRel:
-        if (!acc.TryReadPtr(AddOffset(cursor.fp, info.ra.offset), &new_ip)) {
           new_ip = 0;
         }
         break;

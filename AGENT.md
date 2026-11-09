@@ -18,8 +18,8 @@ The contract:
   unwinding, on the bet that real frames are SP-offset or FP-framed.
 * CFI outside that model fails the lookup (reported when diagnostics are
   enabled). It is never reinterpreted. Heuristics (PLT and trampoline byte
-  matching, then `GuessUnwindInfo`) run only when the lookup fails, whether
-  CFI is missing or unusable (§4.1), and they run silently.
+  matching, then `GuessCaller`) run only when the lookup fails, whether CFI
+  is missing or unusable (§4.1), and they run silently.
 * Targets modern Linux with glibc 2.35+ (`_dl_find_object`). x86-64
   and aarch64 are supported; x86-64 has much more test coverage. riscv
   and 32-bit may come later.
@@ -143,7 +143,7 @@ defines it; Bazel does not. The `RuntimeDiag` path always bumps them, so
 | `backtrace-core.{h,cc}` | the *policy* half of CFI lookup: a visitor that turns decoded CFI into a `FrameInfo`. Also `DoUnwindLookupFromInputs`, which serves a module without a live process |
 | `eh-frame-reader.h` | the *decoder* half: `.eh_frame_hdr` search, CIE/FDE parsing and the CFI opcode loop. It is visitor-templated |
 | `aw-structs.h` | the unwind model: `CfaRule`, `RegisterRule`, `FrameInfo`, `Cursor`, `CompressedFrameInfo` |
-| `aw-arch.h`, `aw-arch-{x86_64,aarch64}.h` | per-arch `struct Arch` with a fixed static interface: register numbers, PLT and signal-frame byte matching, `GuessUnwindInfo` |
+| `aw-arch.h`, `aw-arch-{x86_64,aarch64}.h` | per-arch `struct Arch` with a fixed static interface: register numbers, PLT and signal-frame byte matching, `GuessCaller` |
 | `aw-asm-{x86_64,aarch64}.S`, `aw-asm-notes.h` | the library's assembly, currently just `aw_capture_caller_cursor`, which gives the entry points their starting `Cursor` (§4.1); the ELF notes every `.S` must carry |
 | `unwind-info-cache.h` | `UnwindInfoCache` (§4.4) |
 | `aw-addrcheck.{h,c}` | async-signal-safe `/proc/self/maps` queries, using `PROCMAP_QUERY` or a snapshot plus bsearch |
@@ -322,7 +322,7 @@ When a lookup produces nothing, the **fallback chain** runs in this order:
    second decode. It is reported only here so that steps 1 and 2 can claim
    the frame first (glibc's `__restore_rt` and the lazy PLT carry
    expressions).
-4. `Arch::GuessUnwindInfo`, as for any other CFI we can't use.
+4. `Arch::GuessCaller`, as for any other CFI we can't use.
 
 Everything in the chain that reads code is bounds-checked against
 `LazyAddrChecker::ExecutableBoundsFor()`. Byte matching of this kind breaks
@@ -333,7 +333,7 @@ alignment and that the address lies in a readable VMA. It starts from the
 sp's VMA. A read outside the cached bounds rediscovers them from whatever VMA
 holds the address, so unwinding can cross a `sigaltstack`. The TLS bounds
 cache is a seqlock because a nested signal can update it mid-write. The
-guesses (`GuessUnwindInfo`) read the stack directly, after doing their own
+guesses (`GuessCaller`) read the stack directly, after doing their own
 read+write VMA lookup.
 
 ### 4.2 CFI lookup and failure reporting
@@ -576,13 +576,15 @@ and doubles the cost of each step; `AW_BT_CROSS_CHECK=0` turns it off.
 
 ### 4.8 The aarch64 guess
 
-`Arch::GuessUnwindInfo` is per-arch because **`bl` puts the RA in x30, not on
-the stack**. x86-64's "`*sp` looks like a pc" guess would report the
+`Arch::GuessCaller` returns the caller's cursor directly, built from the
+values it has already read and checked; `UnwindLoop` continues from it as it
+does after a signal frame. It is per-arch because **`bl` puts the RA in x30,
+not on the stack**. x86-64's "`*sp` looks like a pc" guess would report the
 grandparent on aarch64. Two shapes remain:
 
 * **x30 is live.** This covers leaf functions, prologue and epilogue windows,
-  PLT stubs and `blr` through null. CFA == sp, which is exactly
-  `ResetFrameInfo`. It needs a register file, so it applies to leaf frames
+  PLT stubs and `blr` through null. The caller's sp is this frame's sp, and
+  its fp is unchanged. It needs a register file, so it applies to leaf frames
   only.
 * **The AAPCS64 frame record at fp**, `{caller's x29, RA}`.
 
@@ -599,10 +601,9 @@ through fp. Preferring the record wrongly deletes a caller.
 (the CFA). AAPCS64 doesn't fix where in the frame the record goes. gcc puts it
 at the frame's lowest address, but after any outgoing stack arguments, and
 right before the CFA for any function with a stack canary; clang puts it near
-the CFA. So the guess's CFA
-is `CfaRule::Unknown`, and the step sets the caller's sp to **`kUnknownReg`**
-(`~0`: unaligned, and any offset from it wraps to an address no stack read
-accepts). The callback gets 0 for it, as `aw-backtrace.h` promises.
+the CFA. So the guess sets the caller's sp to **`kUnknownReg`** (`~0`:
+unaligned, and any offset from it wraps to an address no stack read accepts).
+The callback gets 0 for it, as `aw-backtrace.h` promises.
 
 **The caller's own CFI then decides**, in `UnwindLoop`:
 
@@ -620,10 +621,7 @@ explicit `-fomit-frame-pointer` build, some asm) drops its caller from the
 trace. `arm64-leaf-test.cc` case 7 covers the guess-again path and case 8 the
 way back to a known sp.
 
-The other two rules are `fp = MemFpRel(0)` and `ra = MemFpRel(8)`.
-`RegisterRule::MemFpRel` for RA exists only for this guess, and
-`CompressedFrameInfo` cannot represent it, nor `CfaRule::Unknown`. **Guesses
-are never cached**: they depend on the cursor, not just the pc.
+Guesses produce no `FrameInfo`, so there is nothing of theirs to cache.
 
 **The guess never reads code**, so it cannot fault on execute-only text. A
 candidate pc must be nonzero, 4-aligned and in an executable VMA. There is one
@@ -717,7 +715,7 @@ separately and requires *both* sides to agree.
 
 Also open:
 
-* **No guess-vs-CFI differ.** This is the cheap oracle for `GuessUnwindInfo`
+* **No guess-vs-CFI differ.** This is the cheap oracle for `GuessCaller`
   on either arch: wherever `DoUnwindLookup` succeeds, also run the guess and
   diff the step.
 * **The comparer's own machinery is largely untested.** This covers

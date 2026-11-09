@@ -3,7 +3,7 @@
 //
 // The aarch64 companion of amd64-leaf-test.cc: hand-written asm with
 // deliberately *absent* CFI, so that every unwind step out of it has to come
-// from Arch::GuessUnwindInfo. None of the cfiless_* functions below carry
+// from Arch::GuessCaller. None of the cfiless_* functions below carry
 // .cfi_startproc, so the assembler emits no FDE for them and DoUnwindLookup
 // fails on every pc inside them.
 //
