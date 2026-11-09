@@ -35,11 +35,26 @@ bzlmod, module `aw-backtrace`, two packages: `//` and `//perf-convert`.
 ```
 bazel test ...:all
 bazel test -c opt ...:all        # NDEBUG: drops assert(), keeps CHECK()
-./test-all-cfg.rb                # gcc/clang x opt/dbg, plain and stepped; what CI runs
+./test-all-cfg.rb                # gcc/clang x opt/dbg x flag sets, plain and stepped; what CI runs
 ```
 
-For each of the four configurations, `test-all-cfg.rb` first runs a plain
-`bazel test ...:all`. It then reruns the `stepped`-tagged targets
+`test-all-cfg.rb` runs gcc and clang, each with `-c opt` and `-c dbg`. With
+`-c opt` it also runs these flag sets, passed as `--copt` (bazel places them
+after its own `-fstack-protector -fno-omit-frame-pointer`, so they win):
+
+* `hardened`: `-fstack-protector-strong -fstack-clash-protection`, plus
+  `-mbranch-protection=standard` on arm64 or `-fcf-protection=full` on x86-64;
+* `stress`: `-fstack-protector-all -fomit-frame-pointer`;
+* `bare`: `-fno-stack-protector -fomit-frame-pointer`;
+* `x86-64-v3`: `-march=x86-64-v3` (DRAP frames), on x86-64 hosts with AVX2
+  only. Its stepped runs use qemu `-cpu Haswell-noTSX`.
+
+A flag the compiler rejects is dropped, and a set left empty is skipped. Only
+the default set builds `//perf-convert`. Every configuration runs even after a
+failure, and the failed ones are listed at the end.
+
+For each configuration it first runs a plain `bazel test ...:all`. It then
+reruns the `stepped`-tagged targets
 (`aw-backtrace-test`, `amd64-drap-test`, `lua-test`) with
 `--run_under="qemu-$(uname -m) -plugin v/pstepper/pstepper_plugin.so"`,
 `AW_BT_REQUIRE_STEPPER=1` and `--test_output=all`. It needs:
@@ -50,8 +65,11 @@ For each of the four configurations, `test-all-cfg.rb` first runs a plain
 
 Extra arguments are passed through to every `bazel` invocation. On arm64 it
 adds `-cpu cortex-a76` to qemu and sets `AW_BT_CLANG_KNOWN_BUGS=1` for clang
-(§5). It leaves out `//perf-convert` when the compiler lacks a working
-`std::source_location`, which is clang 14 on ubuntu-22.04 (abseil needs it).
+(§5), and links gcc's builds with `-mno-fix-cortex-a53-843419`: GNU ld's
+workaround for that erratum moves instructions into CFI-less stubs, which the
+stepped runs would keep flagging. It leaves out `//perf-convert` when the
+compiler lacks a working `std::source_location`, which is clang 14 on
+ubuntu-22.04 (abseil needs it).
 
 Traps:
 
